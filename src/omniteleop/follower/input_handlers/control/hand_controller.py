@@ -5,6 +5,7 @@ from typing import Dict, Any
 
 from omniteleop.follower.input_handlers.control.commands import HandCommand
 
+
 class AbstractHandController(ABC):
     """Abstract base class for hand/end-effector controllers.
 

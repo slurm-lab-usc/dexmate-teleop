@@ -42,6 +42,7 @@ else:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         return ch
 
+
 from dynamixel_sdk import *  # Uses Dynamixel SDK library
 
 # ********* DYNAMIXEL Model definition *********

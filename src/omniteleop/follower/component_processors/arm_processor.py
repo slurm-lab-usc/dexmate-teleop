@@ -12,6 +12,7 @@ from omniteleop.follower.input_handlers.base_handler import (
     ArmCommandType,
 )
 
+
 class ArmProcessor(BaseComponentProcessor):
     """Processes arm commands for left or right arm.
 

@@ -8,6 +8,7 @@ from enum import Enum, auto
 from typing import Dict, Optional, Callable
 from loguru import logger
 
+
 class ButtonEvent(Enum):
     """Button event types."""
 
@@ -16,6 +17,7 @@ class ButtonEvent(Enum):
     RELEASED = auto()  # Button just released (falling edge)
     HELD = auto()  # Button held for required duration
     HOLDING = auto()  # Button being held but not yet triggered
+
 
 @dataclass
 class DebouncedButton:
@@ -178,6 +180,7 @@ class DebouncedButton:
         self._hold_triggered = False
         self._last_event = ButtonEvent.NONE
 
+
 @dataclass
 class ButtonCombo:
     """
@@ -312,6 +315,7 @@ class ButtonCombo:
 
         hold_time = time.time() - self._combo_start_time
         return max(self.hold_duration - hold_time, 0.0)
+
 
 class ButtonManager:
     """

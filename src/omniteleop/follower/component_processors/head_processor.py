@@ -11,6 +11,7 @@ from omniteleop.follower.component_processors.base_processor import (
 )
 from omniteleop.follower.input_handlers.base_handler import RobotCommand, CommandMode
 
+
 class HeadProcessor(BaseComponentProcessor):
     """Processes head position commands.
 

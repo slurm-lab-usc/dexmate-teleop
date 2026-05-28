@@ -7,17 +7,20 @@ from typing import Dict, Any, Optional
 import threading
 import numpy as np
 
+
 class CommandMode(Enum):
     """Mode for command execution."""
 
     ABSOLUTE = "absolute"
     RELATIVE = "relative"
 
+
 class ArmCommandType(Enum):
     """Type of arm command."""
 
     JOINT = "joint"  # Direct joint positions
     EE_POSE = "ee_pose"  # End-effector pose (requires IK)
+
 
 @dataclass
 class SafetyFlags:
@@ -27,6 +30,7 @@ class SafetyFlags:
     limits_enforced: bool = False
     emergency_stop: bool = False  # True means estop needs to be activated
     exit_requested: bool = False
+
 
 @dataclass
 class RobotCommand:
@@ -47,6 +51,7 @@ class RobotCommand:
     output_components: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     safety_flags: SafetyFlags = field(default_factory=SafetyFlags)
     valid: bool = True
+
 
 class BaseInputHandler(ABC):
     """Abstract base class for teleoperation input handlers.

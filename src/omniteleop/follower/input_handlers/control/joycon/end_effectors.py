@@ -17,6 +17,7 @@ from omniteleop.follower.input_handlers.control.end_effector import (
     AbstractEndEffectorController,
 )
 
+
 @dataclass
 class JoyConEndEffectorInput:
     """Parsed JoyCon input for end-effector control."""
@@ -27,6 +28,7 @@ class JoyConEndEffectorInput:
     zl_zr_pressed: bool = False  # ZL for left, ZR for right - digital button
     l_r_pressed: bool = False  # L for left, R for right - top button
     fine_adjustment_active: bool = False  # Whether fine adjustment mode is active
+
 
 class HandF5D6Controller(AbstractEndEffectorController):
     """Controller for 5-finger/6-DoF dexterous hands.
@@ -169,6 +171,7 @@ class HandF5D6Controller(AbstractEndEffectorController):
         """Get predefined pose by name."""
         return self.predefined_poses[pose_name]
 
+
 class GripperController(AbstractEndEffectorController):
     """Controller for simple grippers.
 
@@ -266,6 +269,7 @@ class GripperController(AbstractEndEffectorController):
         """Get predefined pose by name."""
         return self.predefined_poses.get(pose_name, [])
 
+
 class NoEndEffector(AbstractEndEffectorController):
     """Placeholder for arms without end-effectors."""
 
@@ -276,6 +280,7 @@ class NoEndEffector(AbstractEndEffectorController):
     def process_input(self, joycon_input: JoyConEndEffectorInput) -> Dict[str, float]:
         """No-op - returns empty dict."""
         return self.joint_positions
+
 
 def create_end_effector(
     side: str, config: Dict[str, Any]

@@ -4,6 +4,7 @@
 import sys
 from loguru import logger
 
+
 def setup_logging(debug: bool = False):
     """Configure loguru for efficient logging.
 

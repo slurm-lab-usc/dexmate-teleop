@@ -17,6 +17,7 @@
 # limitations under the License.
 # *******************************************************************************
 
+
 # *******************************************************************************
 # ***********************     Read and Write Example      ***********************
 #  Required Environment to run this example :
@@ -54,6 +55,7 @@ else:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         return ch
 
+
 from dynamixel_sdk import *  # Uses Dynamixel SDK library
 
 # ********* DYNAMIXEL Model definition *********
@@ -64,6 +66,7 @@ MY_DXL = "X_SERIES"  # X330 (5.0 V recommended), X430, X540, 2X430
 # MY_DXL = 'PRO_A_SERIES' # PRO series with (A) firmware update.
 # MY_DXL = 'P_SERIES'     # PH54, PH42, PM54
 # MY_DXL = 'XL320'        # [WARNING] Operating Voltage : 7.4V
+
 
 # Control table address
 if MY_DXL == "X_SERIES" or MY_DXL == "MX_SERIES":
@@ -128,6 +131,7 @@ dxl_goal_position = [
     DXL_MAXIMUM_POSITION_VALUE,
 ]  # Goal position
 
+
 # Initialize PortHandler instance
 # Set the port path
 # Get methods and members of PortHandlerLinux or PortHandlerWindows
@@ -146,6 +150,7 @@ else:
     print("Press any key to terminate...")
     getch()
     quit()
+
 
 # Set port baudrate
 if portHandler.setBaudRate(BAUDRATE):
@@ -221,6 +226,7 @@ while 1:
         index = 1
     else:
         index = 0
+
 
 # Disable Dynamixel Torque
 dxl_comm_result, dxl_error = packetHandler.write1ByteTxRx(

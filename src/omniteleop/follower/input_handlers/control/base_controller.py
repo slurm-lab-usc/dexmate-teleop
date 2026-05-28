@@ -5,6 +5,7 @@ from typing import Dict, Any
 
 from omniteleop.follower.input_handlers.control.commands import BaseCommand
 
+
 class AbstractBaseController(ABC):
     """Abstract base class for mobile base controllers.
 

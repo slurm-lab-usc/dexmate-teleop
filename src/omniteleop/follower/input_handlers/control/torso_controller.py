@@ -5,6 +5,7 @@ from typing import Dict, Any
 
 from omniteleop.follower.input_handlers.control.commands import TorsoCommand
 
+
 class AbstractTorsoController(ABC):
     """Abstract base class for torso controllers.
 

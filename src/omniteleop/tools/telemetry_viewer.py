@@ -19,6 +19,7 @@ from dexcomm import Node
 from dexcomm.codecs import DictDataCodec
 from loguru import logger
 
+
 class RerunTelemetryViewer:
     """Real-time telemetry visualization using Rerun."""
 
@@ -558,6 +559,7 @@ class RerunTelemetryViewer:
         finally:
             self.node.shutdown()
 
+
 def main(
     namespace: str = "",
     telemetry_topic: str = "robot/telemetry",
@@ -589,6 +591,7 @@ def main(
         logger.info("Telemetry viewer stopped by user")
     except Exception as e:
         logger.error(f"Error running telemetry viewer: {e}")
+
 
 if __name__ == "__main__":
     import tyro

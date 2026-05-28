@@ -32,6 +32,7 @@
 # This example resets all properties of Dynamixel to default values, such as %% ID : 1 / Baudnum : 34 (Baudrate : 57600)
 #
 
+
 import os
 from time import sleep
 
@@ -55,6 +56,7 @@ else:
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         return ch
+
 
 from dynamixel_sdk import *  # Uses Dynamixel SDK library
 
@@ -92,6 +94,7 @@ else:
     print("Press any key to terminate...")
     getch()
     quit()
+
 
 # Set port baudrate
 if portHandler.setBaudRate(BAUDRATE):
@@ -133,6 +136,7 @@ else:
     print("Failed to change the controller baudrate")
     print("Press any key to terminate...")
     quit()
+
 
 # Read Dynamixel baudnum
 dxl_baudnum_read, dxl_comm_result, dxl_error = packetHandler.read1ByteTxRx(

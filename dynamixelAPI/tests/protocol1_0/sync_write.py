@@ -51,6 +51,7 @@ else:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         return ch
 
+
 from dynamixel_sdk import *  # Uses Dynamixel SDK library
 
 # Control table address
@@ -84,6 +85,7 @@ dxl_goal_position = [
     DXL_MAXIMUM_POSITION_VALUE,
 ]  # Goal position
 
+
 # Initialize PortHandler instance
 # Set the port path
 # Get methods and members of PortHandlerLinux or PortHandlerWindows
@@ -108,6 +110,7 @@ else:
     getch()
     quit()
 
+
 # Set port baudrate
 if portHandler.setBaudRate(BAUDRATE):
     print("Succeeded to change the baudrate")
@@ -116,6 +119,7 @@ else:
     print("Press any key to terminate...")
     getch()
     quit()
+
 
 # Enable Dynamixel#1 Torque
 dxl_comm_result, dxl_error = packetHandler.write1ByteTxRx(
@@ -220,6 +224,7 @@ while 1:
         index = 1
     else:
         index = 0
+
 
 # Disable Dynamixel#1 Torque
 dxl_comm_result, dxl_error = packetHandler.write1ByteTxRx(

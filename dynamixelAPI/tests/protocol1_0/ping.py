@@ -51,6 +51,7 @@ else:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         return ch
 
+
 from dynamixel_sdk import *  # Uses Dynamixel SDK library
 
 # Protocol version
@@ -80,6 +81,7 @@ else:
     print("Press any key to terminate...")
     getch()
     quit()
+
 
 # Set port baudrate
 if portHandler.setBaudRate(BAUDRATE):

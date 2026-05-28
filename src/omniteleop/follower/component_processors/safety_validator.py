@@ -11,6 +11,7 @@ from dexmotion.utils import robot_utils
 
 from omniteleop.follower.input_handlers.base_handler import RobotCommand
 
+
 @dataclass
 class CollisionState:
     """State information for collision checking."""
@@ -18,6 +19,7 @@ class CollisionState:
     has_collision: bool
     joint_positions: np.ndarray
     colliding_links: list
+
 
 class SafetyValidator:
     """Validates robot commands for safety.

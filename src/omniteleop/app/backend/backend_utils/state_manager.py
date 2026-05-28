@@ -9,6 +9,7 @@ import asyncio
 import time
 from typing import Optional
 
+
 class StateManager:
     def __init__(self):
         self._estop = False
@@ -36,6 +37,7 @@ class StateManager:
                 "is_recording": is_recording,
                 "episode_id": episode_id,
             }
+
 
 # Global singleton
 state_manager = StateManager()

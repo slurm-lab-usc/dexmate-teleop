@@ -188,6 +188,12 @@ recorder:
   auto_stop_on_estop: false  # Stop recording on emergency stop
   num_workers: 4  # Number of parallel workers for saving images (0 = sequential)
 
+  # dexdata Spec selector for the new Writer/Reader API.
+  data_spec_id: vega_1p_gripper
+  depth:
+    min_range: 0.1
+    max_range: 8.0
+
   # Component recording configuration - specify what to save
   components:
     # Joint states
@@ -205,13 +211,14 @@ recorder:
     # Camera images
     head_left_rgb: true
     head_right_rgb: true
-    left_wrist_rgb: true  
-    right_wrist_rgb: true 
+    head_left_depth: false
+    left_wrist_rgb: true
+    right_wrist_rgb: true
 
 init_pos:
   left_arm: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
   right_arm: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
   head: [0.0, 0.0, 0.0]
-  torso: [0.52, 1.05, 0.37]
+  torso: [0.4691536417280289, 1.6168411843374948, 1.0482057635783288]
   left_hand: [0.78]
   right_hand: [0.78]

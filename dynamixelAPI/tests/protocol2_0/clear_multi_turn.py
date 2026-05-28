@@ -75,6 +75,7 @@ else:
 
         return 0
 
+
 from dynamixel_sdk import *  # Uses Dynamixel SDK library
 
 # ********* DYNAMIXEL Model definition *********
@@ -139,6 +140,7 @@ else:
     print("Press any key to terminate...")
     getch()
     quit()
+
 
 # Set port baudrate
 if portHandler.setBaudRate(BAUDRATE):

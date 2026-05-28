@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "omniteleop"
-version = "0.4.2a"
+version = "0.4.3"
 description = "Universal teleoperation system for robot control"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -39,14 +39,12 @@ dependencies = [
     "opencv-python>=4.5.0",  # For image processing in recorder
     "dexcomm>=0.4.0",
     "dexmotion>=0.4.0",
+    "ompl==1.7.0",
     "hatch",
     "joycon-lib",
     "fastapi>=0.100.0",
     "dextop",
     "uvicorn[standard]>=0.20.0",
-    "mcap>=0.0.10",
-    "mcap-protobuf-support>=0.0.5",
-    "protobuf>=3.20.0",
     "pynput>=1.7.0",
 ]
 
@@ -61,17 +59,27 @@ dev = [
     "pre-commit",
 ]
 
+data = [
+    "dexdata>=0.1.0,<=0.2.0",
+]
+
+vr = [
+    "dexstream",
+]
+
 [project.scripts]
 omni-arm = "omniteleop.leader.arm_reader:main"
 omni-joycon = "omniteleop.leader.joycon_reader:main"
+omni-paddle = "omniteleop.leader.paddle_leader:main"
 omni-cmd = "omniteleop.follower.command_processor:main"
 omni-robot = "omniteleop.follower.robot_controller:main"
 omni-telemetry = "omniteleop.tools.telemetry_viewer:main"
 omni-recorder = "omniteleop.record.mdp_recorder:main"
+omni-mcap-recorder = "omniteleop.record.mcap_recorder:main"
 
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/omniteleop"]
+packages = ["src/omniteleop", "internal"]
 
 [tool.hatch.build.targets.sdist]
 include = [

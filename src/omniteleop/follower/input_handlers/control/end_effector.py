@@ -5,6 +5,7 @@ from typing import Dict, Any
 
 from loguru import logger
 
+
 class AbstractEndEffectorController(ABC):
     """Abstract base class for end-effector controllers.
 

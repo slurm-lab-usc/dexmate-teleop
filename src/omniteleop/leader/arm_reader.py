@@ -25,6 +25,7 @@ from omniteleop.common.logging import setup_logging
 from omniteleop.common.debug_display import get_debug_display
 from loguru import logger
 
+
 class LeaderArmReader:
     """Reads leader arm (exoskeleton) positions and publishes via Zenoh."""
 
@@ -554,6 +555,7 @@ class LeaderArmReader:
 
         logger.info("Leader arm reader stopped")
 
+
 def main(
     namespace: str = "",
     com_port: Optional[str] = None,
@@ -601,6 +603,7 @@ def main(
         logger.info("Shutting down...")
     finally:
         reader.cleanup()
+
 
 if __name__ == "__main__":
     sys.exit(tyro.cli(main))

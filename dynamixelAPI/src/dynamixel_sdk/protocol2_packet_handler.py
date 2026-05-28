@@ -47,6 +47,7 @@ ERRNUM_ACCESS = 7  # Access error
 
 ERRBIT_ALERT = 128  # When the device has a problem, this bit is set to 1. Check "Device Status Check" value.
 
+
 class Protocol2PacketHandler(object):
     def getProtocolVersion(self):
         return 2.0

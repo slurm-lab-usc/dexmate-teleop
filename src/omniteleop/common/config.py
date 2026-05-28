@@ -11,6 +11,7 @@ import yaml
 from loguru import logger
 from omniteleop import LIB_PATH
 
+
 class RobotConfig(dict):
     """Robot configuration loaded from YAML file.
 
@@ -93,6 +94,26 @@ class RobotConfig(dict):
         """
         return self.get("init_pos", {}).get(part, None)
 
+    def get_data_spec_path(self) -> Path:
+        """Resolve the dexdata Spec JSON for recording.
+
+        Priority:
+        1. ``recorder.data_spec_path`` (absolute or relative to repo CWD).
+        2. ``recorder.data_spec_id``  → ``<dexdata>/specs/embodiment/<id>.json``.
+        3. The ``ROBOT_CONFIG`` env var stem (the omniteleop config name).
+        """
+        recorder = self.get("recorder", {}) or {}
+        path_override = recorder.get("data_spec_path")
+        if path_override:
+            return Path(path_override).expanduser()
+
+        spec_id = recorder.get("data_spec_id") or os.environ.get(
+            "ROBOT_CONFIG", self.config_path.stem
+        )
+        import dexdata  # local import keeps omniteleop importable without dexdata
+
+        return Path(dexdata.__file__).parent / "specs" / "embodiment" / f"{spec_id}.json"
+
     def get_leader_arms(self) -> Dict[str, Any]:
         """Get leader arms configuration with backward compatibility.
 
@@ -137,8 +158,10 @@ class RobotConfig(dict):
         handler_config = self.get("input_handlers", {}).get("vr", {})
         return handler_config.get("socket", {}).get("server_url", server_url)
 
+
 # Global configuration instance (singleton pattern)
 _config: Optional[RobotConfig] = None
+
 
 def get_config(config_path: Optional[Path] = None) -> RobotConfig:
     """Get the robot configuration (loads if needed).

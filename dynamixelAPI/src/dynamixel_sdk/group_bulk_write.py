@@ -21,6 +21,7 @@
 
 from .robotis_def import *
 
+
 class GroupBulkWrite:
     def __init__(self, port, ph):
         self.port = port

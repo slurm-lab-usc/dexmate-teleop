@@ -44,6 +44,7 @@ from omniteleop.follower.input_handlers.base_handler import (
 from omniteleop.follower.input_handlers.exo_joycon_handler import ExoJoyconHandler
 from dexbot_utils import RobotInfo
 
+
 class CommandProcessor:
     """Processes teleoperation commands with integrated safety validation.
 
@@ -69,6 +70,7 @@ class CommandProcessor:
         visualize: bool = False,
         initial_joint_positions: Optional[Dict[str, Any]] = None,
         config_name: Optional[str] = None,
+        lock_hand_collision_avoidance: bool = False,
     ):
         """Initialize the command processor with configuration and handlers.
 
@@ -78,10 +80,16 @@ class CommandProcessor:
             visualize: Whether to enable visualization in simulator.
             initial_joint_positions: Initial joint positions for motion manager.
             config_name: Name of config file (without .yaml extension).
+            lock_hand_collision_avoidance: If True, freeze LEFT_HAND/RIGHT_HAND
+                joints in the MotionManager at the configured "open" pose so the
+                collision checker treats them as a fixed open hand. Joycon hand
+                commands still flow through to the robot, but bypass MotionManager
+                updates for hand joints.
 
         Raises:
             RuntimeError: If input handler initialization fails.
         """
+        self.lock_hand_collision_avoidance = lock_hand_collision_avoidance
         # Initialize Node with namespace support
         self.node = Node(name="command_processor", namespace=namespace)
         self.namespace = namespace
@@ -104,6 +112,11 @@ class CommandProcessor:
 
         # Initialize motion manager
         joints_to_lock = ["BASE"]
+        if self.lock_hand_collision_avoidance:
+            joints_to_lock += ["LEFT_HAND", "RIGHT_HAND"]
+            initial_joint_positions = self._seed_open_hand_positions(
+                initial_joint_positions
+            )
         self.motion_manager = MotionManager(
             visualizer_type="sapien",
             init_visualizer=visualize,
@@ -155,6 +168,13 @@ class CommandProcessor:
         self._align_checked = self.bypass_real_robot
         self._last_safe_command: Optional[RobotCommand] = None
 
+        # Fresh-release gate: after alignment passes, require the operator
+        # to engage joycon estop at least once, then release, before motion
+        # actually starts. Prevents surprise motion when the user had
+        # already released joycon while the exo was still out of range.
+        # Bypass mode auto-satisfies this (True from start).
+        self._post_align_estop_seen = self.bypass_real_robot
+
         # Realignment tracking: when estop is released, re-check proximity
         # to current robot joint positions before resuming motion.
         self._estop_was_active = False
@@ -174,6 +194,44 @@ class CommandProcessor:
             )
 
         logger.info(f"CommandProcessor initialized with {self.teleop_mode} mode")
+
+    def _seed_open_hand_positions(
+        self, initial_joint_positions: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Seed initial_joint_positions with the configured open-hand pose.
+
+        Used when hand collision-avoidance is locked: hand joints are frozen
+        in the reduced pinocchio model at this pose, so the collision checker
+        sees a consistent open hand regardless of joycon hand commands.
+        """
+        seeded = dict(initial_joint_positions) if initial_joint_positions else {}
+        handler_cfg = self.config.get("input_handlers", {}).get(self.teleop_mode, {})
+        hands_cfg = handler_cfg.get("hands", {})
+        for side in ("left", "right"):
+            component = f"{side}_hand"
+            if not self.robot_info.has_component(component):
+                continue
+            open_pose = (
+                hands_cfg.get(side, {}).get("poses", {}).get("open")
+            )
+            if open_pose is None:
+                logger.warning(
+                    f"lock_hand_collision_avoidance: no '{side}.poses.open' under "
+                    f"input_handlers.{self.teleop_mode}.hands; hand will lock at "
+                    "whatever default the model uses."
+                )
+                continue
+            joint_names = self.robot_info.get_component_joints(component)
+            if len(joint_names) != len(open_pose):
+                logger.warning(
+                    f"lock_hand_collision_avoidance: {component} has "
+                    f"{len(joint_names)} joints but 'open' pose has "
+                    f"{len(open_pose)} values; skipping."
+                )
+                continue
+            for name, value in zip(joint_names, open_pose):
+                seeded[name] = value
+        return seeded
 
     def _initialize_processors(self) -> None:
         """Initialize component processors based on robot capabilities."""
@@ -195,6 +253,7 @@ class CommandProcessor:
                 self.motion_manager,
                 self.robot_info,
                 self.teleop_mode,
+                lock_collision_avoidance=self.lock_hand_collision_avoidance,
             )
         if self.robot_info.has_component("right_hand"):
             self.processors["right_hand"] = HandProcessor(
@@ -203,6 +262,7 @@ class CommandProcessor:
                 self.motion_manager,
                 self.robot_info,
                 self.teleop_mode,
+                lock_collision_avoidance=self.lock_hand_collision_avoidance,
             )
 
         # Single-instance components - check if they exist on robot
@@ -237,13 +297,18 @@ class CommandProcessor:
         """Create input handler based on configured teleoperation mode.
 
         Factory method that creates the appropriate input handler
-        (ExoJoyconHandler or VRHandler) based on the teleop_mode setting.
+        (currently only ExoJoyconHandler) based on the teleop_mode setting.
 
         Returns:
             BaseInputHandler instance or None if mode is unsupported.
 
         Note:
-            Supported modes are 'exo_joycon' and 'vr'.
+            Only 'exo_joycon' is supported here. VR paddle teleop is now
+            owned by the `omni-paddle` leader process
+            (`src/omniteleop/leader/paddle_leader.py`), which subscribes to
+            dexstream's `vr/controllers` Zenoh topic, runs IK in-process,
+            and publishes `robot_commands` directly. `command_processor`
+            is no longer in the VR path.
         """
         # Get handler configuration from unified structure
         handler_config = self.config.get("input_handlers", {}).get(self.teleop_mode, {})
@@ -257,9 +322,13 @@ class CommandProcessor:
             logger.info("Created ExoJoyconHandler for exoskeleton + JoyCon input")
             return handler
         elif self.teleop_mode == "vr":
-            handler = VRHandler(handler_config, self.namespace, self.motion_manager)
-            logger.info("Created VRHandler for VR input")
-            return handler
+            raise ValueError(
+                "teleop_mode='vr' is no longer supported by command_processor. "
+                "VR paddle control is now owned by the omni-paddle leader "
+                "(src/omniteleop/leader/paddle_leader.py), which publishes "
+                "robot_commands directly. Remove 'vr' from this config or "
+                "launch omni-paddle instead."
+            )
 
         else:
             logger.error(f"Unsupported teleop mode: {self.teleop_mode}")
@@ -383,20 +452,57 @@ class CommandProcessor:
             # Ensure emergency stop is also active when exiting
             command.safety_flags.emergency_stop = True
 
-        # Check for emergency stop and motion control start
+        # ── Alignment check (runs every tick until it latches) ──────────
+        # Run the alignment check unconditionally — do NOT gate it on
+        # joycon estop state. The user must be able to observe the
+        # ALIGN → PAUSED transition as soon as the exo enters range,
+        # regardless of whether they have joycon engaged or released.
+        # Joycon releases during ALIGN are suppressed further down by
+        # force-stopping the output command until alignment passes.
+        if not self._align_checked and self._is_exo_aligned_with_robot(command):
+            self._align_checked = True
+            self._sync_motion_manager_to_robot_state()
+            logger.success("Exo joints aligned — motion gate lifted.")
+
+        # ── Force estop while not aligned ───────────────────────────────
+        # Overrides joycon — any release attempts during ALIGN have no
+        # effect on the published command.
+        if not self._align_checked:
+            command.safety_flags.emergency_stop = True
+
+        # ── Post-align fresh-engagement gate ────────────────────────────
+        # Once aligned, we require the user to have joycon engaged
+        # (emergency_stop=True) at least once before we'll honor a
+        # release. This prevents motion from starting the instant
+        # alignment passes if the user had already released joycon
+        # during ALIGN. If they held joycon engaged throughout, this
+        # flag flips True on the same tick alignment passes, so a
+        # single subsequent release starts motion — matching the
+        # flow "ALIGN → (exo in range) → PAUSED → (release joycon)
+        # → ACTIVE".
+        if (
+            self._align_checked
+            and not self._post_align_estop_seen
+            and command.safety_flags.emergency_stop
+        ):
+            self._post_align_estop_seen = True
+
+        # If aligned but user has never engaged estop since alignment,
+        # force estop on this tick (they're coasting on a pre-align
+        # release).
+        if self._align_checked and not self._post_align_estop_seen:
+            command.safety_flags.emergency_stop = True
+
+        # ── Motion control start (standard path) ────────────────────────
         if command.safety_flags.emergency_stop:
             # Emergency stop is active, don't start motion control
             pass
         elif not self._motion_control_started:
-            # Alignment is only checked on the very first start.
-            # After that (e.g. estop toggle), motion control resumes immediately.
-            if self._align_checked or self._is_exo_aligned_with_init_pos(command):
-                self._motion_control_started = True
-                self._align_checked = True
-                self._sync_motion_manager_to_robot_state()
-                logger.success("Exo joints aligned — motion control started.")
-            else:
-                command.safety_flags.emergency_stop = True
+            # First tick with estop=False reaching here necessarily has
+            # _align_checked=True AND _post_align_estop_seen=True (the
+            # earlier blocks re-force estop=True otherwise). Start motion.
+            self._motion_control_started = True
+            logger.success("Motion control started.")
 
         # Special case: Dual-arm EE pose requires both arms together
         if self._should_process_dual_arm_ee_pose(command):
@@ -585,11 +691,16 @@ class CommandProcessor:
             return bool(obj)
         return obj
 
-    def _is_exo_aligned_with_init_pos(self, command: RobotCommand) -> bool:
-        """Checks whether exo arm joints are within threshold of the config init_pos.
+    def _is_exo_aligned_with_robot(self, command: RobotCommand) -> bool:
+        """Checks whether exo arm joints are within threshold of the robot's
+        current joint positions.
 
         Only runs when teleop_mode is 'exo_joycon'. For other modes (e.g. VR)
         alignment is not required and this returns True immediately.
+
+        Compares exo against the live robot joints (not config init_pos), so
+        the check is valid regardless of where the robot physically is when
+        teleop starts.
 
         Args:
             command: Current RobotCommand containing exo input_components.
@@ -600,26 +711,36 @@ class CommandProcessor:
         if self.teleop_mode != "exo_joycon":
             return True
 
+        with self._robot_joints_lock:
+            robot_joints_snapshot = (
+                self.latest_robot_joints.copy() if self.latest_robot_joints else None
+            )
+
+        if robot_joints_snapshot is None:
+            return False
+
+        joint_data = robot_joints_snapshot.get("joints", {})
+
         checks = [
-            ("left_arm", self._init_pos_left_arm),
-            ("right_arm", self._init_pos_right_arm),
+            ("left_arm", joint_data.get("left_arm", [])),
+            ("right_arm", joint_data.get("right_arm", [])),
         ]
-        for arm_name, init_pos in checks:
+        for arm_name, robot_pos in checks:
+            if not robot_pos or len(robot_pos) < 7:
+                return False
             arm_data = command.input_components.get(arm_name, {})
-            positions = arm_data.get("pos", [])
-            if not positions:
-                continue
-            for i, (exo_val, init_val) in enumerate(zip(positions, init_pos)):
-                diff = abs(exo_val - init_val)
+            exo_pos = arm_data.get("pos", [])
+            if not exo_pos or len(exo_pos) < 7:
+                return False
+            for i, (exo_val, robot_val) in enumerate(zip(exo_pos, robot_pos)):
+                diff = abs(exo_val - robot_val)
                 if diff > self._align_threshold:
                     key = f"{arm_name}_{i}"
                     prev = self._last_align_log.get(key, -999)
-                    if (
-                        abs(diff - prev) > 0.01
-                    ):  # only log when value changes meaningfully
+                    if abs(diff - prev) > 0.01:
                         logger.warning(
                             f"[ALIGN] {arm_name} joint {i + 1} not aligned: "
-                            f"exo={exo_val:.3f} init={init_val:.3f} diff={diff:.3f} "
+                            f"exo={exo_val:.3f} robot={robot_val:.3f} diff={diff:.3f} "
                             f"(threshold {self._align_threshold})"
                         )
                         self._last_align_log[key] = diff
@@ -731,11 +852,13 @@ class CommandProcessor:
         self.node.shutdown()  # Dexcomm Node cleanup
         logger.info("CommandProcessor stopped")
 
+
 def main(
     namespace: str = "",
     debug: bool = False,
     visualize: bool = False,
     config_name: Optional[str] = None,
+    lock_hand_collision_avoidance: bool = False,
 ) -> None:
     """Main entry point for command processor.
 
@@ -746,6 +869,9 @@ def main(
         debug: Whether to enable debug display output.
         visualize: Whether to visualize the robot.
         config_name: Name of config file (without .yaml extension).
+        lock_hand_collision_avoidance: Freeze hand joints at the configured
+            "open" pose in the MotionManager so the collision checker ignores
+            finger motion. Joycon hand commands still reach the robot.
 
     Example:
         $ omni-cmd --namespace /robot1 --debug
@@ -758,6 +884,7 @@ def main(
         debug=debug,
         visualize=visualize,
         config_name=config_name,
+        lock_hand_collision_avoidance=lock_hand_collision_avoidance,
     )
 
     exit_requested = False
@@ -774,6 +901,7 @@ def main(
 
         logger.info("Forcing process exit due to exit request")
         os._exit(0)  # Force immediate exit without cleanup (all threads killed)
+
 
 if __name__ == "__main__":
     import sys

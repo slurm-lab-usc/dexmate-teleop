@@ -4,6 +4,7 @@ from typing import Dict, Any
 from loguru import logger
 from omniteleop.follower.input_handlers.control.commands import HeadCommand
 
+
 class HeadController:
     """Interprets JoyCon inputs for manual head control.
 

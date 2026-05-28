@@ -3,6 +3,7 @@
 import numpy as np
 import ruckig
 
+
 class RuckigArmTrajectoryGenerator:
     """Jerk-limited trajectory generator for 7-DOF arm joints."""
 
@@ -54,6 +55,7 @@ class RuckigArmTrajectoryGenerator:
         self.inp.target_position = qpos.tolist()
         self.inp.target_velocity = [0.0] * self.dof
         self.inp.target_acceleration = [0.0] * self.dof
+
 
 class RuckigTorsoTrajectoryGenerator:
     """Jerk-limited trajectory generator with conservative limits for torso joints."""

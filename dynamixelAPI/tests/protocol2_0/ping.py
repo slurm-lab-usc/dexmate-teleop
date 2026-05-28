@@ -17,6 +17,7 @@
 # limitations under the License.
 # *******************************************************************************
 
+
 # *******************************************************************************
 # ***********************     Ping Example      ***********************
 #  Required Environment to run this example :
@@ -54,6 +55,7 @@ else:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         return ch
 
+
 from dynamixel_sdk import *  # Uses Dynamixel SDK library
 
 # DYNAMIXEL Protocol Version (1.0 / 2.0)
@@ -88,6 +90,7 @@ else:
     print("Press any key to terminate...")
     getch()
     quit()
+
 
 # Set port baudrate
 if portHandler.setBaudRate(BAUDRATE):

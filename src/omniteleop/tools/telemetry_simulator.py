@@ -17,6 +17,7 @@ from omniteleop.common import get_config
 from dexcomm.codecs import DictDataCodec
 from omniteleop.common.logging import setup_logging
 
+
 class TelemetrySimulator:
     """Simulates robot telemetry data for debugging purposes."""
 
@@ -264,6 +265,7 @@ class TelemetrySimulator:
         finally:
             self.node.shutdown()
 
+
 def main(
     namespace: str = "",
     telemetry_topic: str = "robot/telemetry",
@@ -312,6 +314,7 @@ def main(
         return 1
 
     return 0
+
 
 if __name__ == "__main__":
     import sys

@@ -17,6 +17,7 @@
 # limitations under the License.
 ################################################################################
 
+
 # *******************************************************************************
 # ***********************     Indirect Address Example      ***********************
 #  Required Environment to run this example :
@@ -53,6 +54,7 @@ else:
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         return ch
+
 
 from dynamixel_sdk import *  # Uses Dynamixel SDK library
 
@@ -195,6 +197,7 @@ else:
     getch()
     quit()
 
+
 # Set port baudrate
 if portHandler.setBaudRate(BAUDRATE):
     print("Succeeded to change the baudrate")
@@ -203,6 +206,7 @@ else:
     print("Press any key to terminate...")
     getch()
     quit()
+
 
 # Disable Dynamixel Torque :
 # Indirect address would not accessible when the torque is already enabled
@@ -297,6 +301,7 @@ if dxl_comm_result != COMM_SUCCESS:
     print("%s" % packetHandler.getTxRxResult(dxl_comm_result))
 elif dxl_error != 0:
     print("%s" % packetHandler.getRxPacketError(dxl_error))
+
 
 # Add parameter storage for multiple values
 dxl_addparam_result = groupSyncRead.addParam(DXL_ID)

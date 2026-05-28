@@ -42,6 +42,7 @@ ERRBIT_CHECKSUM = 16  # Instruction packet checksum is incorrect.
 ERRBIT_OVERLOAD = 32  # The current load cannot be controlled by the set torque.
 ERRBIT_INSTRUCTION = 64  # Undefined instruction or delivering the action command without the reg_write command.
 
+
 class Protocol1PacketHandler(object):
     def getProtocolVersion(self):
         return 1.0

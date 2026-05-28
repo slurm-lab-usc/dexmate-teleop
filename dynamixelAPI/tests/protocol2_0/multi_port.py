@@ -56,6 +56,7 @@ else:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         return ch
 
+
 from dynamixel_sdk import *  # Uses Dynamixel SDK library
 
 # ********* DYNAMIXEL Model definition *********
@@ -304,6 +305,7 @@ while 1:
         index = 1
     else:
         index = 0
+
 
 # Disable Dynamixel#1 Torque
 dxl_comm_result, dxl_error = packetHandler.write1ByteTxRx(

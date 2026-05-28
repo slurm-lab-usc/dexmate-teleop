@@ -2,10 +2,13 @@
 
 from .arm_reader import LeaderArmReader as LeaderArmReader, main as leader_arm_main
 from .joycon_reader import JoyConReader as JoyConReader, main as joycon_main
+from .paddle_leader import PaddleLeader as PaddleLeader, main as paddle_main
 
 __all__ = [
     "LeaderArmReader",
     "leader_arm_main",
     "JoyConReader",
     "joycon_main",
+    "PaddleLeader",
+    "paddle_main",
 ]

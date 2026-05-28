@@ -5,6 +5,7 @@ import sys
 import io
 from contextlib import contextmanager
 
+
 @contextmanager
 def suppress_loguru_module(module_name: str = "dexmotion", enabled: bool = True):
     """Context manager to suppress loguru logs from a specific module.
@@ -53,6 +54,7 @@ def suppress_loguru_module(module_name: str = "dexmotion", enabled: bool = True)
         # Restore stdout/stderr
         sys.stdout = old_stdout
         sys.stderr = old_stderr
+
 
 # Convenience function for the most common use case
 def suppress_dexmotion_logs():

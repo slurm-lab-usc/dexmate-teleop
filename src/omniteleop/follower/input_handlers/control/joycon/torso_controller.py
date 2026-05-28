@@ -6,6 +6,7 @@ from omniteleop.follower.input_handlers.control.torso_controller import (
     AbstractTorsoController,
 )
 
+
 class TorsoController(AbstractTorsoController):
     """Interprets JoyCon inputs for torso control.
 

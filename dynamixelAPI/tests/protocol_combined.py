@@ -55,6 +55,7 @@ else:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         return ch
 
+
 from dynamixel_sdk import *  # Uses Dynamixel SDK library
 
 # Control table address for Dynamixel MX
@@ -108,6 +109,7 @@ portHandler = PortHandler(DEVICENAME)
 packetHandler1 = PacketHandler(PROTOCOL_VERSION1)
 packetHandler2 = PacketHandler(PROTOCOL_VERSION2)
 
+
 # Open port
 if portHandler.openPort():
     print("Succeeded to open the port")
@@ -116,6 +118,7 @@ else:
     print("Press any key to terminate...")
     getch()
     quit()
+
 
 # Set port baudrate
 if portHandler.setBaudRate(BAUDRATE):
@@ -221,6 +224,7 @@ while 1:
         index = 1
     else:
         index = 0
+
 
 # Disable Dynamixel#1 Torque
 dxl_comm_result, dxl_error = packetHandler1.write1ByteTxRx(

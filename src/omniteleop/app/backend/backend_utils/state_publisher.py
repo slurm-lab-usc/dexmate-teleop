@@ -3,6 +3,7 @@
 import asyncio
 from fastapi import WebSocket, WebSocketDisconnect
 
+
 class StatePublisher:
     """Handles state streaming."""
 
@@ -83,6 +84,7 @@ class StatePublisher:
             print(f"State stream error: {e}")
         finally:
             await self.remove_connection(websocket)
+
 
 # Global state publisher instance
 state_publisher = StatePublisher()

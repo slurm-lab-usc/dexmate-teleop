@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Dict
 
+
 @dataclass
 class BaseCommand:
     """Mobile base velocity command."""
@@ -12,6 +13,7 @@ class BaseCommand:
     wz: float = 0.0  # Angular velocity in rad/s
     active: bool = False
 
+
 @dataclass
 class TorsoCommand:
     """Torso movement command."""
@@ -19,6 +21,7 @@ class TorsoCommand:
     delta_x: float = 0.0  # Forward/backward delta in meters
     delta_z: float = 0.0  # Up/down delta in meters (vertical)
     active: bool = False
+
 
 @dataclass
 class HandCommand:
@@ -36,6 +39,7 @@ class HandCommand:
         if self.right_positions is None:
             self.right_positions = {}
 
+
 @dataclass
 class HeadCommand:
     """Head movement command."""
@@ -44,6 +48,7 @@ class HeadCommand:
     delta_j2: float = 0.0  # Delta for head_j2 (yaw)
     delta_j3: float = 0.0  # Delta for head_j3 (roll)
     active: bool = False
+
 
 @dataclass
 class RobotCommands:

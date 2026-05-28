@@ -19,6 +19,7 @@ from dexcomm.utils import RateLimiter
 from omniteleop.common import get_config
 from omniteleop.common.logging import setup_logging
 
+
 class ReplayRecorder:
     """Simple replay system for recorded MDP data.
 
@@ -321,6 +322,7 @@ class ReplayRecorder:
         self.node.shutdown()  # Dexcomm Node cleanup
         logger.info("🛑 ReplayRecorder stopped")
 
+
 def main(
     pkl_file: str,
     namespace: str = "",
@@ -356,6 +358,7 @@ def main(
         return 1
 
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(tyro.cli(main))

@@ -22,6 +22,7 @@
 from .protocol1_packet_handler import *
 from .protocol2_packet_handler import *
 
+
 def PacketHandler(protocol_version):
     # FIXME: float or int-to-float comparison can generate weird behaviour
     if protocol_version == 1.0:

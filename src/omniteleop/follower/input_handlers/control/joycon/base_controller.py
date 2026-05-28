@@ -6,6 +6,7 @@ from omniteleop.follower.input_handlers.control.base_controller import (
     AbstractBaseController,
 )
 
+
 class BaseController(AbstractBaseController):
     """Interprets JoyCon inputs for mobile base control.
 

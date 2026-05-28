@@ -3,7 +3,7 @@
 
 # Teleoperation mode selection
 # Options: "exo_joycon" (exoskeleton + JoyCon), "vr" (VR controllers), "keyboard" (testing)
-teleop_mode: 'vr'
+teleop_mode: 'exo_joycon'
 
 # Input handler configurations for different teleop modes
 input_handlers:
@@ -190,6 +190,17 @@ recorder:
   auto_stop_on_estop: false  # Stop recording on emergency stop
   num_workers: 4  # Number of parallel workers for saving images (0 = sequential)
 
+  # dexdata Spec selector for the new Writer/Reader API.
+  # Resolves to <installed dexdata>/specs/embodiment/<id>.json.
+  # Override with data_spec_path: <absolute_or_relative_path> for a custom file.
+  data_spec_id: vega_1_f5d6
+  # Depth quantization range (meters). PNG-16 codec maps [min_range, max_range]
+  # → [0, 65535] (0 reserved for invalid). Sensor frames outside this range
+  # clip on encode.
+  depth:
+    min_range: 0.1
+    max_range: 8.0
+
   # Component recording configuration - specify what to save
   components:
     # Joint states
@@ -207,6 +218,7 @@ recorder:
     # Camera images
     head_left_rgb: true
     head_right_rgb: true
+    head_left_depth: false
 
 init_pos:
   left_arm: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]

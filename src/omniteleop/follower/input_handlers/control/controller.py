@@ -5,6 +5,7 @@ from typing import Dict, Any
 
 from omniteleop.follower.input_handlers.control.commands import RobotCommands
 
+
 class AbstractController(ABC):
     """Abstract base class for all input device controllers.
 

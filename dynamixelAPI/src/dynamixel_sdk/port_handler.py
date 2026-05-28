@@ -26,6 +26,7 @@ import sys
 LATENCY_TIMER = 16
 DEFAULT_BAUDRATE = 1000000
 
+
 class PortHandler(object):
     def __init__(self, port_name):
         self.is_open = False

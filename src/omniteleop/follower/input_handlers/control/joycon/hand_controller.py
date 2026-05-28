@@ -14,6 +14,7 @@ from omniteleop.follower.input_handlers.control.joycon.end_effectors import (
     JoyConEndEffectorInput,
 )
 
+
 class HandController(AbstractHandController):
     """Interprets JoyCon inputs for hand/gripper control.
 

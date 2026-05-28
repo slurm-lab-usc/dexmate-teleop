@@ -72,6 +72,7 @@ DXL_MOVING_STATUS_THRESHOLD = 20                # Dynamixel moving status thresh
 index = 0
 dxl_goal_position = [DXL_MINIMUM_POSITION_VALUE, DXL_MAXIMUM_POSITION_VALUE]         # Goal position
 
+
 # Initialize PortHandler instance
 # Set the port path
 # Get methods and members of PortHandlerLinux or PortHandlerWindows
@@ -156,6 +157,7 @@ while 1:
     elif dxl_error != 0:
         print("%s" % packetHandler.getRxPacketError(dxl_error))
 
+
     while 1:
         # Read Dynamixel#1 present position
         dxl1_present_position, dxl_comm_result, dxl_error = packetHandler.read4ByteTxRx(portHandler1, DXL1_ID, ADDR_MX_PRESENT_POSITION)
@@ -181,6 +183,7 @@ while 1:
         index = 1
     else:
         index = 0    
+
 
 # Disable Dynamixel#1 Torque
 dxl_comm_result, dxl_error = packetHandler.write1ByteTxRx(portHandler1, DXL1_ID, ADDR_MX_TORQUE_ENABLE, TORQUE_DISABLE)

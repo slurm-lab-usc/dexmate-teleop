@@ -31,6 +31,7 @@
 #  Maintainer : Zerom, Will Son
 # *******************************************************************************
 
+
 import os
 
 if os.name == "nt":
@@ -53,6 +54,7 @@ else:
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         return ch
+
 
 from dynamixel_sdk import *  # Uses Dynamixel SDK library
 
@@ -89,6 +91,7 @@ else:
     getch()
     quit()
 
+
 # Set port baudrate
 if portHandler.setBaudRate(BAUDRATE):
     print("Succeeded to change the baudrate")
@@ -112,6 +115,7 @@ elif dxl_error != 0:
     print("%s" % packetHandler.getRxPacketError(dxl_error))
 
 print("[ID:%03d] reboot Succeeded\n" % DXL_ID)
+
 
 # Close port
 portHandler.closePort()

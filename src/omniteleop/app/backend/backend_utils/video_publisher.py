@@ -4,6 +4,7 @@ import asyncio
 from fastapi import WebSocket, WebSocketDisconnect
 from typing import Callable
 
+
 class VideoPublisher:
     """Handles video streaming for cameras."""
 
@@ -96,6 +97,7 @@ class VideoPublisher:
         """Stop all active streams."""
         for camera_id in list(self.active_streams.keys()):
             await self.stop_stream(camera_id)
+
 
 # Global video publisher instance
 video_publisher = VideoPublisher()

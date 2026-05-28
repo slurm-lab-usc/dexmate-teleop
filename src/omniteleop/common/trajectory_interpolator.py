@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Tuple, Literal
 from scipy.interpolate import PchipInterpolator, interp1d
 from collections import deque
 
+
 class TrajectoryInterpolator:
     """Standalone trajectory interpolator with velocity computation.
 
@@ -309,6 +310,7 @@ class TrajectoryInterpolator:
             return None
 
         return self._times[0], self._times[-1]
+
 
 # Convenience function for single-use interpolation
 def interpolate_trajectory(

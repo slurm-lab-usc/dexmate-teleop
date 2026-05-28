@@ -14,6 +14,7 @@ from omniteleop.follower.input_handlers.control.joycon.controller import (
     JoyConController,
 )
 
+
 class ExoJoyconHandler(BaseInputHandler):
     """Handler for exoskeleton arm inputs combined with JoyCon controllers.
 

@@ -15,6 +15,7 @@ pip install -e .
 
 - 🕹️ **JoyCon Controller Support** - Use Nintendo JoyCon for robot control
 - 💪 **Exoskeleton Arm Control** - Intuitive arm teleoperation via Dynamixel exoskeleton
+- 🥽 **VR Teleoperation** - Relative delta commands to conrol humanoid arm and torso.
 - 🛡️ **Safety System** - Built-in emergency stop and joint limits enforcement
 - 📹 **Data Collection** - Record teleoperation data for policy learning
 - 🔄 **Trajectory Replay** - Replay recorded robot trajectories
@@ -30,8 +31,8 @@ omni-cmd       # Command processor with safety
 omni-robot     # Robot controller
 omni-recorder  # MDP recorder for policy learning
 omni-telemetry # Telemetry viewer
+omni-paddle    # VR reader
 
-# alpha
 app/launch.sh  # One command that replaces all
 ```
 

@@ -10,6 +10,9 @@ import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
+from loguru import logger
+
+
 class StateChecker:
     """Determines robot control state via a priority-based logic tree.
 
@@ -29,6 +32,12 @@ class StateChecker:
     # Threshold (radians) for exo-vs-robot proximity check in ALIGN state.
     ESTOP_ALIGN_THRESHOLD: float = 0.75
 
+    # Threshold (radians) between exo and config init_pos. Must stay in sync
+    # with CommandProcessor._align_threshold — CommandProcessor gates motion
+    # on this criterion, and StateChecker reports ALIGN whenever the gate is
+    # engaged so the UI shows "Aligning" while the robot is actually blocked.
+    INIT_POS_ALIGN_THRESHOLD: float = 1.0
+
     # Joint limits for exoskeleton in radians, format: (min, max).
     JOINT_LIMITS: Dict[str, Tuple[float, float]] = {
         "arm_j1": (-3.071, 3.071),
@@ -42,7 +51,7 @@ class StateChecker:
         "arm_j7_right": (-1.117, 1.378),
     }
 
-    # Topics required for the BOOT state check.
+    # Topics required for the BOOT state check (exoskeleton default).
     REQUIRED_TOPIC_SUFFIXES: List[str] = [
         "state/arm/left",
         "state/arm/right",
@@ -50,6 +59,23 @@ class StateChecker:
         "sensors/head_camera/left_rgb",
         "sensors/head_camera/right_rgb",
     ]
+
+
+    # Sensor topics surfaced to the UI so users can verify each stream is live
+    # and whether the active config will record it. Mapping goes from the topic
+    # suffix (robot_name prepended at check time) → the matching key under
+    # ``recorder.components`` in the robot YAML config. Keep in sync with the
+    # record_components dict in ``record/base_recorder.py``.
+    SENSOR_TOPIC_TO_RECORD_KEY: Dict[str, str] = {
+        "sensors/head_camera/left_rgb": "head_left_rgb",
+        "sensors/head_camera/right_rgb": "head_right_rgb",
+        "sensors/head_camera/depth": "head_left_depth",
+        "sensors/left_wrist_camera/rgb": "left_wrist_rgb",
+        "sensors/right_wrist_camera/rgb": "right_wrist_rgb",
+        "state/wrench/left": "left_wrist_wrench",
+        "state/wrench/right": "right_wrist_wrench",
+    }
+    SENSOR_TOPIC_SUFFIXES: List[str] = list(SENSOR_TOPIC_TO_RECORD_KEY.keys())
 
     # Processes required to pass the DIAGNOSIS state.
     REQUIRED_PROCESSES: List[str] = [
@@ -59,7 +85,12 @@ class StateChecker:
         "arm_reader.py",
     ]
 
-    def __init__(self, robot_name: str, rpi_mode: bool = False) -> None:
+    def __init__(
+        self,
+        robot_name: str,
+        rpi_mode: bool = False,
+        leader_mode: str = "exoskeleton",
+    ) -> None:
         """Initializes the state checker.
 
         Args:
@@ -67,9 +98,14 @@ class StateChecker:
             rpi_mode: If True, skip local hardware/process checks and instead
                 verify that the RPi is publishing ``exo/joints`` and
                 ``exo/joycon`` topics.
+            leader_mode: ``"exoskeleton"``, ``"vr"``, or ``"vr_sim"``.
+                Determines which BOOT/DIAGNOSIS checks apply. ``"vr"`` skips
+                exo/joycon-specific checks (paddle_leader replaces those).
+                ``"vr_sim"`` skips all robot-side checks (no follower).
         """
         self.robot_name = robot_name
         self.rpi_mode = rpi_mode
+        self.leader_mode = leader_mode if leader_mode in {"exoskeleton", "vr", "vr_sim"} else "exoskeleton"
 
         # Exo joints subscriber state.
         self._node = None
@@ -87,6 +123,36 @@ class StateChecker:
 
         # Diagnosis details populated on each call to _check_active_conditions.
         self._diagnosis_details: dict = {}
+
+        # Init positions loaded from the same config CommandProcessor reads.
+        # Used by the init_pos ALIGN criterion — if any exo joint drifts more
+        # than INIT_POS_ALIGN_THRESHOLD from init_pos, CommandProcessor will
+        # refuse to start motion, so we report ALIGN.
+        try:
+            from omniteleop.common import get_config
+            _cfg = get_config()
+            _recorder = (_cfg.get("recorder") or {})
+            _rec_components = (_recorder.get("components") or {})
+        except Exception:
+            _recorder = {}
+            _rec_components = {}
+        # Per-component recording flags from config — drives the Recorded /
+        # Not recorded label in the Sensors UI. ``enabled`` is the global
+        # recorder on/off; if False every sensor reports "not recorded"
+        # regardless of its component flag.
+        self._recorder_enabled: bool = bool(_recorder.get("enabled", False))
+        self._recorder_components: Dict[str, bool] = {
+            k: bool(v) for k, v in _rec_components.items()
+        }
+
+        # Cached `dextop topic list` output. Refreshed by each get_state() call
+        # so get_sensor_topics_status() can reuse it without shelling out again.
+        self._last_topic_list: Optional[str] = None
+
+        # Once motion has started for the first time (operator pressed then
+        # released estop after initial alignment), ALIGN is bypassed forever
+        # for this teleop session. Reset by reset_motion_started() on stop.
+        self._motion_started_latch: bool = False
 
         self._init_exo_subscriber()
 
@@ -166,13 +232,17 @@ class StateChecker:
             One of: ``"BOOT"``, ``"DIAGNOSIS"``, ``"ALIGN"``, ``"ACTIVE"``.
         """
         topic_list = self._get_topic_list()
+        self._last_topic_list = topic_list
         if topic_list is None or not self._check_required_topics(topic_list):
             return "BOOT"
 
         if not self._check_active_conditions(topic_list):
             return "DIAGNOSIS"
 
-        if not self._check_exo_joints_within_limits():
+        # ALIGN compares the worn exoskeleton against the robot's init_pos —
+        # only meaningful in exoskeleton mode. VR / VR sim have no exo input,
+        # so skip straight to ACTIVE once DIAGNOSIS passes.
+        if self.leader_mode == "exoskeleton" and not self._check_exo_joints_within_limits():
             return "ALIGN"
 
         return "ACTIVE"
@@ -201,12 +271,17 @@ class StateChecker:
     def _build_required_topics(self) -> List[str]:
         """Builds the fully-qualified required topic names for this robot.
 
-        Appends gripper-specific topics when ``ROBOT_CONFIG`` env var
-        contains ``"gripper"``.
+        Branches on ``self.leader_mode``:
+          - ``vr_sim``: no required topics — BOOT is trivially satisfied.
+            Process checks still apply in DIAGNOSIS.
+          - ``exoskeleton`` / ``vr``: full robot-side requirements (arm state,
+            heartbeat, head cameras).
 
         Returns:
             List of fully-qualified topic name strings.
         """
+        if self.leader_mode == "vr_sim":
+            return []
         suffixes = list(self.REQUIRED_TOPIC_SUFFIXES)
         return [f"{self.robot_name}/{s}" for s in suffixes]
 
@@ -239,12 +314,53 @@ class StateChecker:
         found = [t for t in required if t in topic_list]
         return {"missing": missing, "found": found}
 
+    def get_sensor_topics_status(self) -> Dict[str, Dict[str, bool]]:
+        """Returns publication + recording status for each sensor topic.
+
+        Reuses the topic list captured during the most recent
+        :meth:`get_state` call, so calling this does not shell out again.
+        If ``get_state`` has not run yet (or the last call failed to get a
+        topic list), every sensor reports ``live=False``.
+
+        The ``recorded`` flag reflects the active robot YAML config
+        (selected via the ``ROBOT_CONFIG`` env var by ``get_config``). A
+        sensor is "recorded" iff ``recorder.enabled`` is true AND its
+        entry in ``recorder.components`` is truthy.
+
+        Returns:
+            Dict mapping topic suffix → ``{"live": bool, "recorded": bool}``.
+            Empty when leader_mode is ``"vr_sim"`` — no robot, no sensors.
+        """
+        if self.leader_mode == "vr_sim":
+            return {}
+        topic_list = self._last_topic_list
+        result: Dict[str, Dict[str, bool]] = {}
+        for suffix, record_key in self.SENSOR_TOPIC_TO_RECORD_KEY.items():
+            live = (
+                topic_list is not None
+                and f"{self.robot_name}/{suffix}" in topic_list
+            )
+            recorded = (
+                self._recorder_enabled
+                and bool(self._recorder_components.get(record_key, False))
+            )
+            result[suffix] = {"live": live, "recorded": recorded}
+        return result
+
     # -------------------------------------------------------------------------
     # DIAGNOSIS — Process and hardware readiness
     # -------------------------------------------------------------------------
 
     def _check_active_conditions(self, topic_list: str) -> bool:
         """Checks all conditions required to pass the DIAGNOSIS state.
+
+        Branches on ``self.leader_mode``:
+          - ``vr_sim``: only the paddle_leader process is required. No
+            joycon/exo/robot checks (no robot in the loop).
+          - ``vr``: paddle_leader + robot_controller processes plus robot
+            component health. Skips joycon, exo serial port, and exo motors
+            checks (paddle_leader replaces those leader-side responsibilities).
+          - ``exoskeleton`` (default): the historical full set.
 
         Results are stored in ``_diagnosis_details`` for later retrieval
         via :meth:`get_diagnosis_details`.
@@ -255,6 +371,19 @@ class StateChecker:
         Returns:
             True if all active conditions are met.
         """
+        if self.leader_mode == "vr_sim":
+            self._diagnosis_details = {
+                "processes_running": self._check_processes_running(),
+            }
+            return all(self._diagnosis_details.values())
+
+        if self.leader_mode == "vr":
+            self._diagnosis_details = {
+                "processes_running": self._check_processes_running(),
+                "no_component_errors": not self._check_component_errors(),
+            }
+            return all(self._diagnosis_details.values())
+
         if self.rpi_mode:
             # In RPi mode the leader hardware (JoyCon, exo serial port, arm_reader,
             # joycon_reader) lives on a remote machine. Replace those checks with a
@@ -295,12 +424,24 @@ class StateChecker:
         except Exception:
             return False
 
+    def _required_processes(self) -> List[str]:
+        """Process names that must be running for DIAGNOSIS to pass.
+
+        Branches on ``self.leader_mode`` since each leader stack spawns a
+        different set of subprocesses.
+        """
+        if self.leader_mode == "vr_sim":
+            return ["paddle_leader.py"]
+        if self.leader_mode == "vr":
+            return ["paddle_leader.py", "robot_controller.py"]
+        return self.REQUIRED_PROCESSES
+
     def _check_processes_running(self) -> bool:
         """Checks if all required processes are running.
 
         Returns:
-            True if all entries in ``REQUIRED_PROCESSES`` appear in the
-            process list.
+            True if all entries in the mode-specific process list appear in
+            ``ps aux`` output.
         """
         try:
             result = subprocess.run(
@@ -310,7 +451,7 @@ class StateChecker:
                 timeout=5.0,
             )
             process_list = result.stdout
-            return all(proc in process_list for proc in self.REQUIRED_PROCESSES)
+            return all(proc in process_list for proc in self._required_processes())
         except Exception:
             return False
 
@@ -465,30 +606,79 @@ class StateChecker:
     # -------------------------------------------------------------------------
 
     def _check_exo_joints_within_limits(self) -> bool:
-        """Checks ALIGN conditions: absolute joint limits and robot proximity.
+        """Pre-motion alignment check.
 
-        Both conditions must pass:
-            1. All exo joints are within their hardware safe limits.
-            2. All exo joints are within ``ESTOP_ALIGN_THRESHOLD`` radians of
-               the current robot joint positions.
+        Compares exo joints against the robot's CURRENT joint positions
+        (not config init_pos). Once motion has started for the first time
+        (``_motion_started_latch`` is set via :meth:`mark_motion_started`),
+        this always returns True — ALIGN is never shown again.
 
-        Returns:
-            False if joint data is unavailable, any joint is out of range, or
-            any joint deviates from the robot position beyond the threshold.
-            True otherwise.
+        Returns False (ALIGN) if:
+          - Latch not set AND exo data unavailable / short, OR
+          - Any exo joint outside hardware limits, OR
+          - Any exo joint more than INIT_POS_ALIGN_THRESHOLD from the robot's
+            current joint position.
         """
-        joint_angles = self._get_exo_joint_angles()
+        if self._motion_started_latch:
+            return True
 
+        joint_angles = self._get_exo_joint_angles()
         if joint_angles is None:
             return False
 
-        left_joints = joint_angles.get("left", [])
-        right_joints = joint_angles.get("right", [])
+        left = joint_angles.get("left") or []
+        right = joint_angles.get("right") or []
 
-        left_ok = self._check_arm_joints_within_limits(left_joints, is_left=True)
-        right_ok = self._check_arm_joints_within_limits(right_joints, is_left=False)
+        if len(left) < 7 or len(right) < 7:
+            return False
 
-        return left_ok and right_ok
+        left_ok = self._check_arm_joints_within_limits(left, is_left=True)
+        right_ok = self._check_arm_joints_within_limits(right, is_left=False)
+        if not (left_ok and right_ok):
+            return False
+
+        # Compare against robot's current joints, not config init_pos.
+        # If robot joints aren't available yet, stay in ALIGN (safe default).
+        robot_left = self._robot_left_joints
+        robot_right = self._robot_right_joints
+        if not robot_left or not robot_right:
+            return False
+
+        left_aligned = self._arm_within_threshold(left, robot_left)
+        right_aligned = self._arm_within_threshold(right, robot_right)
+
+        return left_aligned and right_aligned
+
+    def _arm_within_threshold(
+        self, exo: List[float], ref: List[float]
+    ) -> bool:
+        """Returns True iff every exo joint is within INIT_POS_ALIGN_THRESHOLD
+        of the corresponding reference joint (robot current position).
+
+        **Strict**: missing/empty/short data returns False (stays in ALIGN).
+        """
+        if not exo or len(exo) < 7 or not ref or len(ref) < 7:
+            return False
+        for e, r in zip(exo, ref):
+            if abs(e - r) > self.INIT_POS_ALIGN_THRESHOLD:
+                return False
+        return True
+
+    def mark_motion_started(self) -> None:
+        """Permanently bypass ALIGN for this teleop session.
+
+        Call once the operator has successfully started motion (first estop
+        release after initial alignment). After this, get_state() will never
+        return "ALIGN" regardless of exo or robot joint positions.
+        """
+        self._motion_started_latch = True
+
+    def reset_motion_started(self) -> None:
+        """Reset the motion-started latch when teleop stops.
+
+        Allows ALIGN to be shown again at the start of the next session.
+        """
+        self._motion_started_latch = False
 
     def update_robot_joints(self, left: List[float], right: List[float]) -> None:
         """Updates the cached robot joint positions used for proximity checks.
@@ -564,40 +754,44 @@ class StateChecker:
     def _get_out_of_limit_details(
         self, joints: List[float], is_left: bool
     ) -> List[str]:
-        """Returns human-readable descriptions of joints outside their limits.
+        """Human-readable descriptions of joints that either fall outside
+        hardware limits OR deviate from the robot's current joints by more
+        than ``INIT_POS_ALIGN_THRESHOLD`` (both drive ALIGN).
 
         Args:
-            joints: List of 7 joint angles in radians.
+            joints: List of 7 exo joint angles in radians.
             is_left: True for left arm, False for right arm.
-
-        Returns:
-            List of strings such as
-            ``"arm_j2: -2.000 rad (limit: -0.453 to 1.553)"``.
         """
-        out_of_limit = []
+        out: List[str] = []
+        robot_pos = self._robot_left_joints if is_left else self._robot_right_joints
         for i, key in enumerate(self._get_limit_keys(is_left)):
             lo, hi = self.JOINT_LIMITS[key]
             if not (lo <= joints[i] <= hi):
-                out_of_limit.append(
+                out.append(
                     f"{key}: {joints[i]:.3f} rad (limit: {lo:.3f} to {hi:.3f})"
                 )
-        return out_of_limit
+                continue
+            if robot_pos and i < len(robot_pos):
+                diff = abs(joints[i] - robot_pos[i])
+                if diff > self.INIT_POS_ALIGN_THRESHOLD:
+                    out.append(
+                        f"{key}: {joints[i]:.3f} rad — off robot pos "
+                        f"({robot_pos[i]:.3f}) by {diff:.3f} rad "
+                        f"(threshold {self.INIT_POS_ALIGN_THRESHOLD:.3f})"
+                    )
+        return out
 
     def _check_arm_joints_within_limits(
         self, joints: List[float], is_left: bool
     ) -> bool:
-        """Checks whether all joints of one arm are within limits.
+        """Checks whether all joints of one arm are within hardware limits.
 
-        Args:
-            joints: List of 7 joint angles in radians.
-            is_left: True for left arm, False for right arm.
-
-        Returns:
-            True if all joints are within limits, or if the list is too
-            short to check.
+        **Strict**: missing/short data returns False (drives ALIGN). This
+        matches the validity check in ``_check_exo_joints_within_limits``
+        so a short exo payload can never latch alignment prematurely.
         """
         if not joints or len(joints) < 7:
-            return True
+            return False
 
         for i, key in enumerate(self._get_limit_keys(is_left)):
             lo, hi = self.JOINT_LIMITS[key]
@@ -674,6 +868,7 @@ class StateChecker:
         except Exception:
             return None
 
+
 def main() -> None:
     """CLI entry point for manual state checker diagnostics."""
     robot_name = os.environ.get("ROBOT_NAME", "")
@@ -695,6 +890,7 @@ def main() -> None:
         print("\nStopping...")
     finally:
         checker.cleanup()
+
 
 if __name__ == "__main__":
     main()

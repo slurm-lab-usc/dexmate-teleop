@@ -77,6 +77,11 @@ safety:
   collision_padding: 0.02
   enable_joint_limits: true
 
+# Physical robot setup
+robot_setup:
+  column_height: 0.0   # meters
+  column_tilt: 0.0      # radians
+
 recorder:
   enabled: true
   save_dir: "recordings"
@@ -89,13 +94,22 @@ recorder:
   auto_stop_on_estop: false
   num_workers: 4
 
+  # dexdata Spec selector for the new Writer/Reader API.
+  data_spec_id: vega_1u
+  depth:
+    min_range: 0.1
+    max_range: 8.0
+
   components:
     left_arm: true
     right_arm: true
     head: false
+    torso: false
     head_left_rgb: false
     head_right_rgb: false
+    head_left_depth: false
 
 init_pos:
   left_arm: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
   right_arm: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  head: [0.0, 0.0, 0.0]

@@ -7,6 +7,7 @@ from dexmotion.motion_manager import MotionManager
 from omniteleop.follower.input_handlers.base_handler import RobotCommand
 from dexbot_utils import RobotInfo
 
+
 class BaseComponentProcessor(ABC):
     """Abstract base class for component processors.
 

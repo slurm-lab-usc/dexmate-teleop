@@ -21,6 +21,7 @@
 
 from .robotis_def import *
 
+
 class GroupSyncRead:
     def __init__(self, port, ph, start_address, data_length):
         self.port = port

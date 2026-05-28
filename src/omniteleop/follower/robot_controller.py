@@ -28,10 +28,12 @@ import threading
 from dexbot_utils import RobotInfo
 from dexcomm.codecs import DictDataCodec
 
+
 class RobotMode(Enum):
     RUNNING = "running"
     STOP = "stop"
     EXIT = "exit"
+
 
 class RobotController:
     """Robot controller with integrated motion interpolation and hardware control."""
@@ -395,33 +397,171 @@ class RobotController:
         logger.debug(f"Home positions parsed: {list(self.home_positions.keys())}")
 
     def _move_to_home(self) -> None:
-        """Move robot to home position using hardware set_joint_pos with wait_time."""
+        """Move robot to home using collision-aware OMPL planning for the arms.
+
+        Flow: move torso directly, plan arms with OMPL, set head directly,
+        open hands. Raises if planning fails rather than falling back to an
+        interpolation that could sweep through a self-collision.
+        """
         self.robot.estop.deactivate()
         time.sleep(0.1)
 
-        # Move torso first if available
-        if self.has_torso and "torso" in self.home_positions:
-            self.robot.torso.set_joint_pos(
-                self.home_positions["torso"],
-                wait_time=9.0,
-                exit_on_reach=True,
-            )
+        self._move_torso_to_home_direct()
+        self._plan_and_execute_arms_to_home()
+        self._move_head_to_home_direct()
 
-        # Move arms and head
-        arm_head_pose = {}
-        for component in ["left_arm", "right_arm", "head"]:
-            if component in self.home_positions:
-                arm_head_pose[component] = self.home_positions[component]
-
-        if arm_head_pose:
-            self.robot.set_joint_pos(arm_head_pose, wait_time=9.0, exit_on_reach=True)
-            logger.info("Robot moved to home position")
-
-        # Open hands only if robot has hands
         if self.hand_type is not None:
             self.robot.left_hand.open_hand()
             self.robot.right_hand.open_hand()
         self.robot.estop.activate()
+
+    def _move_torso_to_home_direct(self) -> None:
+        """Send torso directly to its home position (no planning)."""
+        if not (self.has_torso and "torso" in self.home_positions):
+            return
+        self.robot.torso.set_joint_pos(
+            self.home_positions["torso"],
+            wait_time=9.0,
+            exit_on_reach=True,
+        )
+
+    def _move_head_to_home_direct(self) -> None:
+        """Send head directly to its home position (no planning)."""
+        if "head" not in self.home_positions:
+            return
+        self.robot.head.set_joint_pos(
+            self.home_positions["head"], wait_time=2.0, exit_on_reach=True
+        )
+
+    def _plan_and_execute_arms_to_home(self) -> None:
+        """Plan a collision-free trajectory for both arms to their home pose.
+
+        Uses a temporary MotionManager + OMPL. The planner's pinocchio model
+        only knows about arm joints, so start/goal dicts passed to
+        MoveToConfigurationTask.run() must be arms-only — even though the
+        MotionManager itself is initialized with torso in its config so
+        collision checks account for the current torso pose.
+        """
+        has_left = "left_arm" in self.home_positions
+        has_right = "right_arm" in self.home_positions
+        if not (has_left or has_right):
+            return
+
+        from dexmotion.motion_manager import MotionManager
+        from dexmotion.tasks.move_out_of_self_collision_task import (
+            MoveOutOfSelfCollisionTask,
+        )
+        from dexmotion.tasks.move_to_configuration_task import (
+            MoveToConfigurationTask,
+        )
+        from dexmotion.utils import robot_utils
+
+        # Initial config for MotionManager includes torso so collision checks
+        # see the correct base pose; arms+torso is the same set of components
+        # arm_safe_initializer uses.
+        mm_init_components = ["left_arm", "right_arm"]
+        if self.has_torso:
+            mm_init_components.append("torso")
+        mm_init_config = self.robot.get_joint_pos_dict(mm_init_components)
+
+        motion_manager = MotionManager(
+            init_visualizer=False,
+            initial_joint_configuration_dict=mm_init_config,
+            init_local_ik=False,
+        )
+
+        # Resolve any existing self-collision before planning the main motion.
+        MoveOutOfSelfCollisionTask(
+            initial_joint_configuration=mm_init_config,
+            motion_manager=motion_manager,
+            range_size=0.3,
+            visualize=False,
+        ).run()
+
+        # Arms-only dicts for the planner. Its pinocchio model's joint_names
+        # is the authoritative set — start/goal keys must exactly equal it.
+        assert motion_manager.pin_robot is not None
+        planner_joint_names = robot_utils.get_joint_names(motion_manager.pin_robot)
+
+        start_arms = self._current_arms_qpos_dict(planner_joint_names)
+        goal_arms = self._home_arms_qpos_dict(planner_joint_names)
+
+        planner_task = MoveToConfigurationTask(
+            initial_joint_configuration=start_arms,
+            motion_manager=motion_manager,
+            planner_type="ompl",
+            visualize=False,
+        )
+
+        logger.info("Planning collision-free path to home (OMPL)...")
+        try:
+            _ts, qs_sample, _qds, _qdds, _dur = planner_task.run(
+                start_configuration_dict=start_arms,
+                goal_configuration_dict=goal_arms,
+                control_frequency=self.control_rate,
+                generate_trajectory=True,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"OMPL planning to home failed: {exc}") from exc
+
+        if qs_sample is None or len(qs_sample) == 0:
+            raise RuntimeError("OMPL planning returned an empty trajectory")
+
+        self._execute_arm_trajectory(qs_sample, planner_joint_names)
+        logger.info("Robot moved to home position via OMPL planner")
+
+    def _current_arms_qpos_dict(self, planner_joint_names: List[str]) -> Dict[str, float]:
+        """Return current arm joint positions keyed by planner joint names."""
+        current: Dict[str, float] = {}
+        live = self.robot.get_joint_pos_dict(["left_arm", "right_arm"])
+        # Copy only entries the planner knows about — drops anything not in
+        # the pinocchio model (e.g. torso joints that slip through).
+        for name in planner_joint_names:
+            if name in live:
+                current[name] = float(live[name])
+        return current
+
+    def _home_arms_qpos_dict(self, planner_joint_names: List[str]) -> Dict[str, float]:
+        """Return home arm joint positions keyed by planner joint names."""
+        goal: Dict[str, float] = {}
+        for arm_key in ("left_arm", "right_arm"):
+            if arm_key not in self.home_positions:
+                continue
+            arm = getattr(self.robot, arm_key)
+            for joint_name, pos in zip(arm.joint_name, self.home_positions[arm_key]):
+                if joint_name in planner_joint_names:
+                    goal[joint_name] = float(pos)
+        # If an arm lacks a configured home, pin it at its current position
+        # so start_qpos.keys() == goal_qpos.keys() still holds.
+        live = self.robot.get_joint_pos_dict(["left_arm", "right_arm"])
+        for name in planner_joint_names:
+            if name not in goal and name in live:
+                goal[name] = float(live[name])
+        return goal
+
+    def _execute_arm_trajectory(
+        self, qs_sample, planner_joint_names: List[str]
+    ) -> None:
+        """Stream planned waypoints to both arms at self.control_rate."""
+        rate_limiter = RateLimiter(self.control_rate)
+        logger.info(
+            f"Executing planned home trajectory ({len(qs_sample)} waypoints)..."
+        )
+        left_names = self.robot.left_arm.joint_name
+        right_names = self.robot.right_arm.joint_name
+        has_left = "left_arm" in self.home_positions
+        has_right = "right_arm" in self.home_positions
+        for qpos_array in qs_sample:
+            waypoint = dict(zip(planner_joint_names, qpos_array))
+            if has_left:
+                self.robot.left_arm.set_joint_pos(
+                    np.array([waypoint[j] for j in left_names]), wait_time=0.0
+                )
+            if has_right:
+                self.robot.right_arm.set_joint_pos(
+                    np.array([waypoint[j] for j in right_names]), wait_time=0.0
+                )
+            rate_limiter.sleep()
 
     def _on_safe_command(self, data: Dict) -> None:
         """Handle incoming safe command.
@@ -873,6 +1013,7 @@ class RobotController:
 
         logger.info("Robot controller cleaned up")
 
+
 def main(
     namespace: str = "",
     interpolation_method: str = "none",
@@ -915,6 +1056,7 @@ def main(
     controller.cleanup()
 
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(tyro.cli(main))

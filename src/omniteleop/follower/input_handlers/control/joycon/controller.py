@@ -22,6 +22,7 @@ from omniteleop.follower.input_handlers.utils.button_manager import (
     ButtonEvent,
 )
 
+
 class JoyConController(AbstractController):
     """Centralized interpreter for JoyCon inputs.
 

@@ -17,6 +17,7 @@
 # limitations under the License.
 ################################################################################
 
+
 # *******************************************************************************
 # ***********************     SyncRead and SyncWrite Example      ***********************
 #  Required Environment to run this example :
@@ -53,6 +54,7 @@ else:
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         return ch
+
 
 from dynamixel_sdk import *  # Uses Dynamixel SDK library
 
@@ -157,6 +159,7 @@ else:
     getch()
     quit()
 
+
 # Set port baudrate
 if portHandler.setBaudRate(BAUDRATE):
     print("Succeeded to change the baudrate")
@@ -165,6 +168,7 @@ else:
     print("Press any key to terminate...")
     getch()
     quit()
+
 
 # Enable Dynamixel#1 Torque
 dxl_comm_result, dxl_error = packetHandler.write1ByteTxRx(

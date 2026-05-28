@@ -13,6 +13,7 @@ import time
 # Global default precision - change this to affect all debug output
 DEFAULT_PRECISION = 2  # Number of decimal places for float values
 
+
 class DebugDisplay:
     """Flicker-free debug display using rich Live updates.
 
@@ -403,8 +404,10 @@ class DebugDisplay:
         sys.stdout.write(output)
         sys.stdout.flush()
 
+
 # Singleton instance for each process
 _debug_display: Optional[DebugDisplay] = None
+
 
 def get_debug_display(
     name: str,

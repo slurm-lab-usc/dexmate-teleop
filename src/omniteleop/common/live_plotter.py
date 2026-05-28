@@ -13,6 +13,7 @@ import matplotlib
 
 matplotlib.use("TkAgg")  # Use TkAgg backend for better performance
 
+
 class LiveCommandPlotter:
     """Real-time plotting of robot commands with minimal overhead."""
 
@@ -307,6 +308,7 @@ class LiveCommandPlotter:
             for j, line in enumerate(self.lines[line_key]):
                 if j < num_joints:
                     line.set_data(times, data_array[:, j])
+
 
 class SimpleLivePlotter:
     """Simplified live plotter for quick visualization."""

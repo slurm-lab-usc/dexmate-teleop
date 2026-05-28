@@ -51,21 +51,27 @@ COMM_RX_TIMEOUT = -3001  # There is no status packet
 COMM_RX_CORRUPT = -3002  # Incorrect status packet
 COMM_NOT_AVAILABLE = -9000  #
 
+
 # Macro for Control Table Value
 def DXL_MAKEWORD(a, b):
     return (a & 0xFF) | ((b & 0xFF) << 8)
 
+
 def DXL_MAKEDWORD(a, b):
     return (a & 0xFFFF) | (b & 0xFFFF) << 16
+
 
 def DXL_LOWORD(l):
     return l & 0xFFFF
 
+
 def DXL_HIWORD(l):
     return (l >> 16) & 0xFFFF
 
+
 def DXL_LOBYTE(w):
     return w & 0xFF
+
 
 def DXL_HIBYTE(w):
     return (w >> 8) & 0xFF

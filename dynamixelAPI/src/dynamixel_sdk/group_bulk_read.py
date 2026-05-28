@@ -25,6 +25,7 @@ PARAM_NUM_DATA = 0
 PARAM_NUM_ADDRESS = 1
 PARAM_NUM_LENGTH = 2
 
+
 class GroupBulkRead:
     def __init__(self, port, ph):
         self.port = port

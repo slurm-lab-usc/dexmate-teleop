@@ -1,13 +1,1162 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>OmniTeleop</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>OmniTeleop</title>
+<style>
+  :root {
+    --bg: #f4f4f5;
+    --surface: #ffffff;
+    --border: #e4e4e7;
+    --text: #18181b;
+    --text-muted: #71717a;
+    --input-bg: #ffffff;
+    --input-border: #d4d4d8;
+    --header-bg: #ffffff;
+    --card-shadow: 0 1px 3px rgba(0,0,0,0.07);
+  }
+  body.dark {
+    --bg: #09090b;
+    --surface: #18181b;
+    --border: #27272a;
+    --text: #fafafa;
+    --text-muted: #a1a1aa;
+    --input-bg: #09090b;
+    --input-border: #3f3f46;
+    --header-bg: #18181b;
+    --card-shadow: 0 1px 3px rgba(0,0,0,0.3);
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 14px;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+
+  /* ── Header ── */
+  header {
+    position: sticky; top: 0; z-index: 20;
+    background: var(--header-bg);
+    border-bottom: 1px solid var(--border);
+    height: 48px;
+    display: flex; align-items: center;
+    padding: 0 24px; gap: 10px;
+  }
+  .logo { height: 28px; width: auto; }
+  .logo-title { font-weight: 600; font-size: 13px; letter-spacing: -0.02em; }
+  .header-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+  .conn-dot { width: 8px; height: 8px; border-radius: 50%; background: #f87171; flex-shrink: 0; transition: background .3s; }
+  .conn-dot.connected { background: #10b981; }
+  .icon-btn {
+    background: none; border: none; cursor: pointer; padding: 6px;
+    border-radius: 6px; color: var(--text-muted); display: flex; align-items: center;
+    transition: background .15s;
+  }
+  .icon-btn:hover, .icon-btn.active { background: var(--bg); }
+  .icon-btn svg { width: 16px; height: 16px; }
+  .header-btn-group {
+    display: flex; align-items: center;
+    border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+  }
+  .header-btn-group .icon-btn { border-radius: 0; border-right: 1px solid var(--border); }
+  .debug-btn {
+    background: none; border: none; cursor: pointer;
+    padding: 0 10px; height: 30px; font-size: 11px; font-family: monospace;
+    color: var(--text-muted); transition: background .15s, color .15s;
+  }
+  .debug-btn:hover, .debug-btn.active { background: var(--bg); color: var(--text); }
+
+  /* ── Main layout ── */
+  main { max-width: 1280px; margin: 0 auto; padding: 24px; display: flex; flex-direction: column; gap: 16px; }
+
+  .grid { display: grid; grid-template-columns: 280px 1fr 1fr; gap: 16px; align-items: start; }
+  .left-col { display: flex; flex-direction: column; gap: 12px; }
+
+  /* ── Cards ── */
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; box-shadow: var(--card-shadow); overflow: hidden;
+  }
+  .card-header { padding: 12px 16px 8px; border-bottom: 1px solid var(--border); }
+  .card-title { font-size: 12px; font-weight: 600; color: var(--text); display: flex; align-items: center; gap: 6px; }
+  .card-body { padding: 14px 16px; }
+
+  /* ── Buttons ── */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 6px 14px; border-radius: 7px; font-size: 12px; font-weight: 500;
+    border: 1px solid transparent; cursor: pointer; transition: opacity .15s, background .15s;
+    white-space: nowrap;
+  }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn-primary { background: #18181b; color: #fff; border-color: #18181b; }
+  body.dark .btn-primary { background: #fafafa; color: #18181b; border-color: #fafafa; }
+  .btn-outline { background: transparent; color: var(--text); border-color: var(--border); }
+  .btn-outline:hover:not(:disabled) { background: var(--bg); }
+  .btn-green { background: #059669; color: #fff; border-color: #059669; }
+  .btn-green:hover:not(:disabled) { background: #047857; }
+  .btn-orange { background: transparent; color: #ea580c; border-color: #fed7aa; }
+  .btn-orange:hover:not(:disabled) { background: #fff7ed; }
+  .btn-sm { padding: 4px 10px; font-size: 11px; }
+
+  /* ── E-Stop ── */
+  .estop-btn {
+    width: 100%; padding: 6px 10px; border-radius: 6px;
+    background: #dc2626; color: #fff; border: none;
+    font-weight: 600; font-size: 11px; letter-spacing: .03em;
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    cursor: pointer; transition: background .15s; box-shadow: 0 1px 4px rgba(220,38,38,.25);
+  }
+  .estop-btn:hover { background: #b91c1c; }
+  .estop-btn:disabled { opacity: .5; cursor: not-allowed; }
+  .clear-estop-btn {
+    width: 100%; padding: 6px 10px; border-radius: 6px;
+    background: transparent; color: #059669; border: 2px solid #10b981;
+    font-weight: 600; font-size: 11px; letter-spacing: .03em;
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    cursor: pointer; transition: background .15s;
+  }
+  .clear-estop-btn:hover { background: #ecfdf5; }
+  body.dark .clear-estop-btn:hover { background: #022c22; }
+  .clear-estop-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+  /* ── Status badge ── */
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    border-radius: 999px; padding: 2px 10px; font-size: 11px; font-weight: 500;
+  }
+  .badge-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .badge-boot      { background: #fef3c7; color: #92400e; } .badge-boot .badge-dot      { background: #fbbf24; }
+  .badge-diagnosis { background: #ffedd5; color: #9a3412; } .badge-diagnosis .badge-dot { background: #f97316; }
+  .badge-align     { background: #e0f2fe; color: #075985; } .badge-align .badge-dot     { background: #38bdf8; }
+  .badge-active    { background: #d1fae5; color: #065f46; } .badge-active .badge-dot    { background: #34d399; }
+  .badge-record    { background: #fee2e2; color: #991b1b; } .badge-record .badge-dot    { background: #ef4444; animation: pulse 1s infinite; }
+  .badge-pause     { background: #fef9c3; color: #713f12; } .badge-pause .badge-dot     { background: #facc15; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+  /* ── Status panel ── */
+  .status-grid { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; font-size: 12px; }
+  .obs-row { display: flex; align-items: baseline; gap: 8px; font-size: 11px; }
+  .obs-lbl { color: var(--text-muted); width: 36px; flex-shrink: 0; }
+  .obs-val { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; color: var(--text); word-break: break-all; line-height: 1.4; }
+  .obs-val.stale { color: var(--text-muted); font-style: italic; }
+  .status-grid .lbl { color: var(--text-muted); align-self: center; }
+  .status-grid .val { text-align: right; font-weight: 500; display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+  .sdot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .dot-green { background: #10b981; } .dot-gray { background: #d4d4d8; }
+  .dot-red   { background: #ef4444; } .dot-sky  { background: #38bdf8; }
+  .c-green { color: #059669; } .c-gray { color: #71717a; }
+  .c-red   { color: #dc2626; } .c-sky  { color: #0284c7; }
+
+  /* ── Form elements ── */
+  .field { display: flex; flex-direction: column; gap: 3px; }
+  .field label { font-size: 11px; color: var(--text-muted); }
+  .field input[type=text] {
+    height: 28px; padding: 0 8px; border-radius: 6px;
+    border: 1px solid var(--input-border); background: var(--input-bg); color: var(--text);
+    font-size: 12px; font-family: monospace; outline: none; transition: border-color .15s;
+  }
+  .field input:focus { border-color: #71717a; }
+  .checkbox-row { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 500; cursor: pointer; padding-top: 4px; }
+  .checkbox-row input { cursor: pointer; }
+
+  /* ── Launch form ── */
+  .launch-form {
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg); padding: 12px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .launch-form-btns { display: flex; gap: 8px; padding-top: 4px; }
+
+  /* ── Recording indicator ── */
+  .rec-indicator {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 10px; border-radius: 8px;
+    background: #fef2f2; border: 1px solid #fecaca;
+  }
+  .rec-ping { position: relative; width: 8px; height: 8px; flex-shrink: 0; }
+  .rec-ping::before, .rec-ping::after { content: ''; position: absolute; inset: 0; border-radius: 50%; }
+  .rec-ping::before { background: #ef4444; }
+  .rec-ping::after  { background: #fca5a5; animation: ping 1s cubic-bezier(0,0,.2,1) infinite; }
+  @keyframes ping { 75%,100%{transform:scale(2);opacity:0} }
+  .rec-label { font-size: 11px; font-weight: 500; color: #b91c1c; }
+  .rec-id    { margin-left: auto; font-size: 10px; font-family: monospace; color: #dc2626; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 160px; }
+
+  .section-label { font-size: 11px; color: var(--text-muted); font-weight: 500; }
+  .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .divider { border: none; border-top: 1px solid var(--border); margin: 12px 0 8px; }
+
+  /* ── Camera ── */
+  .camera-card { display: flex; flex-direction: column; }
+  .camera-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+  .camera-title { font-size: 12px; font-weight: 600; }
+  .cam-live     { font-size: 11px; font-weight: 500; color: #059669; }
+  .cam-inactive { font-size: 11px; color: var(--text-muted); }
+  .canvas-wrap  { position: relative; background: #09090b; min-height: 160px; }
+  canvas        { width: 100%; display: block; }
+  .canvas-placeholder { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #52525b; font-size: 13px; }
+  .cam-id { padding: 6px 14px; font-size: 10px; font-family: monospace; color: var(--text-muted); }
+
+  /* ── Error banner ── */
+  .error-banner {
+    display: flex; align-items: flex-start; gap: 8px;
+    padding: 10px 14px; background: #fef2f2; border: 1px solid #fecaca;
+    border-radius: 8px; font-size: 12px; color: #b91c1c;
+  }
+  .error-close { margin-left: auto; background: none; border: none; cursor: pointer; color: #f87171; font-size: 14px; line-height: 1; }
+  .error-close:hover { color: #b91c1c; }
+
+  /* ── Settings panel ── */
+  .settings-row { display: flex; gap: 8px; }
+  .settings-row input {
+    flex: 1; height: 32px; padding: 0 10px; border-radius: 6px;
+    border: 1px solid var(--input-border); background: var(--input-bg); color: var(--text);
+    font-size: 12px; outline: none;
+  }
+  .settings-row input:focus { border-color: #71717a; }
+
+  /* ── Debug panel ── */
+  .debug-card { background: #09090b !important; border-color: #3f3f46 !important; }
+  .debug-card .card-header { border-color: #3f3f46; }
+  .debug-card .card-title  { color: #d4d4d8; font-family: monospace; }
+  .debug-tabs { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; padding-bottom: 8px; border-bottom: 1px solid #3f3f46; }
+  .debug-tab {
+    padding: 2px 8px; border-radius: 4px; font-size: 11px; font-family: monospace;
+    background: none; border: none; cursor: pointer; color: #71717a;
+  }
+  .debug-tab:hover  { background: rgba(255,255,255,.07); color: #d4d4d8; }
+  .debug-tab.active { background: #3f3f46; color: #fff; }
+  .debug-tab .cnt { margin-left: 4px; color: #52525b; }
+  .debug-tab-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .debug-conn { width: 6px; height: 6px; border-radius: 50%; background: #3f3f46; }
+  .debug-conn.on { background: #10b981; }
+  .debug-clear { background: none; border: none; cursor: pointer; font-size: 11px; color: #52525b; }
+  .debug-clear:hover { color: #a1a1aa; }
+  .debug-log { overflow-y: auto; font-family: monospace; font-size: 11px; line-height: 1.6; padding-top: 8px; max-height: 380px; color: #d4d4d8; }
+  .dline { display: flex; padding: 0 4px; }
+  .dline:hover { background: rgba(255,255,255,.04); }
+  .l-default { color: #d4d4d8; } .l-error   { color: #f87171; }
+  .l-warn    { color: #fbbf24; } .l-success { color: #34d399; }
+  .debug-empty { color: #3f3f46; font-style: italic; padding: 4px; }
+
+  /* ── Modal ── */
+  .modal-overlay { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.5); backdrop-filter: blur(2px); }
+  .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 20px 60px rgba(0,0,0,.25); width: 100%; max-width: 480px; margin: 0 16px; overflow: hidden; }
+  .modal-header { display: flex; align-items: center; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--border); background: #fffbeb; }
+  body.dark .modal-header { background: #1c1a0a; }
+  .modal-header svg { width: 18px; height: 18px; color: #d97706; flex-shrink: 0; }
+  .modal-htitle { font-weight: 700; font-size: 12px; letter-spacing: .06em; color: #92400e; }
+  body.dark .modal-htitle { color: #fde68a; }
+  .modal-close { margin-left: auto; background: none; border: none; cursor: pointer; font-size: 18px; color: #d97706; line-height: 1; }
+  .modal-body { padding: 20px; display: flex; flex-direction: column; gap: 16px; max-height: 60vh; overflow-y: auto; font-size: 12px; }
+  .modal-section { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--text-muted); margin-bottom: 6px; }
+  .diag-table { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .diag-row { display: flex; align-items: center; justify-content: space-between; padding: 6px 12px; font-size: 11px; font-family: monospace; }
+  .diag-row:nth-child(odd) { background: var(--bg); }
+  .diag-pass { color: #059669; font-weight: 600; } .diag-fail { color: #dc2626; font-weight: 600; }
+  .topic-chip { font-family: monospace; font-size: 10px; color: #dc2626; background: #fef2f2; padding: 2px 6px; border-radius: 4px; display: block; }
+  body.dark .topic-chip { background: #2d0a0a; }
+  .topic-list { display: flex; flex-direction: column; gap: 3px; }
+  .modal-footer { padding: 12px 20px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; }
+
+  /* ── Doctor modal palette (info/blue vs amber diagnosis) ── */
+  .modal-header.doctor-header { background: #eff6ff; }
+  body.dark .modal-header.doctor-header { background: #0b1a2e; }
+  .doctor-header svg { color: #1d4ed8; }
+  .modal-htitle.doctor-htitle { color: #1e40af; }
+  body.dark .modal-htitle.doctor-htitle { color: #bfdbfe; }
+  .modal-close.doctor-close { color: #1d4ed8; }
+  .doctor-actions { display: flex; flex-direction: column; gap: 8px; }
+  .doctor-action { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 10px 14px; font-size: 12px; }
+  .doctor-action[disabled] { opacity: .6; cursor: wait; }
+  .doctor-action-status { font-size: 11px; color: var(--text-muted); }
+  .doctor-action-status.ok { color: #059669; }
+  .doctor-action-status.err { color: #dc2626; }
+
+  /* ── Estop highlight ── */
+  .card.estop-on { border-color: #fca5a5; background: rgba(254,242,242,.4); }
+  body.dark .card.estop-on { background: rgba(127,29,29,.15); border-color: #7f1d1d; }
+
+  /* ── Responsive ── */
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr 1fr; } .left-col { grid-column: 1 / -1; } }
+  @media (max-width: 600px) { .grid { grid-template-columns: 1fr; } main { padding: 12px; } }
+</style>
+</head>
+<body>
+
+<header>
+  <img src="/assets/Dexmate_logo.png" alt="Dexmate" class="logo" onerror="this.style.display='none'" />
+  <span class="logo-title">OmniTeleop</span>
+  <div class="header-right">
+    <span id="connDot" class="conn-dot" title="Backend disconnected"></span>
+    <button class="icon-btn" id="darkBtn" title="Toggle dark mode">
+      <svg id="moonIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+      <svg id="sunIcon"  viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+    </button>
+    <div class="header-btn-group">
+      <button class="icon-btn" id="settingsBtn" title="Settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+      </button>
+      <button class="icon-btn" id="doctorBtn" title="Doctor">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3v4a6 6 0 0012 0V3"/><path d="M6 3h3M15 3h3"/><path d="M12 13v4a4 4 0 004 4 3 3 0 003-3v-3"/><circle cx="19" cy="12" r="2"/></svg>
+      </button>
+      <button class="debug-btn" id="debugBtn">debug</button>
+    </div>
+  </div>
+</header>
+
+<main>
+
+  <!-- Settings panel -->
+  <div id="settingsPanel" style="display:none">
+    <div class="card" style="border-style:dashed">
+      <div class="card-header"><span class="card-title">Settings</span></div>
+      <div class="card-body">
+        <div class="field" style="max-width:320px">
+          <label>Backend URL</label>
+          <div class="settings-row">
+            <input type="text" id="apiInput" placeholder="http://localhost:5006" />
+            <button class="btn btn-primary btn-sm" id="applyUrlBtn">Apply</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Error banner -->
+  <div id="errorBanner" class="error-banner" style="display:none">
+    <strong>Error:</strong>
+    <span id="errorText"></span>
+    <button class="error-close" id="errorClose">✕</button>
+  </div>
+
+  <!-- 3-column grid -->
+  <div class="grid">
+
+    <!-- Left column -->
+    <div class="left-col">
+
+      <button class="estop-btn" id="estopBtn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+        E-Stop
+      </button>
+      <button class="clear-estop-btn" id="clearEstopBtn" style="display:none">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+        Clear E-Stop
+      </button>
+
+      <!-- Status card -->
+      <div class="card" id="statusCard">
+        <div class="card-header">
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <span class="card-title">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+              Status
+            </span>
+            <span id="stateBadge" class="badge badge-boot"><span class="badge-dot"></span>Booting</span>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="status-grid">
+            <span class="lbl">Teleop</span>
+            <span class="val" id="teleopVal"><span class="sdot dot-gray"></span><span class="c-gray">Stopped</span></span>
+            <span class="lbl">Record</span>
+            <span class="val" id="recordVal"><span class="sdot dot-gray"></span><span class="c-gray">Off</span></span>
+            <span class="lbl">E-Stop</span>
+            <span class="val" id="estopVal"><span class="sdot dot-gray"></span><span class="c-gray">Clear</span></span>
+            <span class="lbl">Active</span>
+            <span id="activeVal" style="text-align:right;font-weight:500;font-size:12px;color:var(--text-muted)">—</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Controls card -->
+      <div class="card">
+        <div class="card-header"><span class="card-title">Controls</span></div>
+        <div class="card-body" style="display:flex;flex-direction:column;gap:14px">
+
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <span class="section-label">Teleoperation</span>
+
+            <div class="launch-form" id="launchForm" style="display:none">
+              <div class="field"><label>ROBOT_NAME</label><input type="text" id="fRobotName" placeholder="auto-detected if empty" /></div>
+              <div class="field"><label>ROBOT_CONFIG</label><input type="text" id="fRobotConfig" placeholder="vega_1p_gripper" /></div>
+              <div class="field"><label>ZENOH_CONFIG (cert name)</label><input type="text" id="fZenohConfig" placeholder="auto-detected if empty" /></div>
+              <div class="field"><label>Leader Mode</label>
+                <select id="fLeaderMode">
+                  <option value="exoskeleton" selected>Exoskeleton</option>
+                  <option value="vr">VR</option>
+                  <option value="vr_sim">VR — sim only</option>
+                </select>
+              </div>
+              <label class="checkbox-row"><input type="checkbox" id="fRecordMode" /> Enable recording</label>
+              <div class="field" id="fRecordFormatRow" style="display:none"><label>Recording format</label>
+                <select id="fRecordFormat">
+                  <option value="mcap" selected>MCAP</option>
+                  <option value="mdp">MDP</option>
+                </select>
+              </div>
+              <div class="launch-form-btns">
+                <button class="btn btn-green btn-sm" style="flex:1" id="launchBtn">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                  Launch
+                </button>
+                <button class="btn btn-outline btn-sm" id="cancelLaunchBtn">Cancel</button>
+              </div>
+            </div>
+
+            <div class="btn-row" id="teleopBtnRow">
+              <button class="btn btn-green" style="flex:1" id="startTeleopBtn">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                Start
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-left:auto;opacity:.6"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <button class="btn btn-outline" style="flex:1" id="stopTeleopBtn">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="18" height="18" rx="1"/></svg>
+                Stop
+              </button>
+            </div>
+          </div>
+
+          <hr class="divider" />
+
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <div style="display:flex;align-items:center;justify-content:space-between">
+              <span class="section-label">Recording</span>
+              <span id="recNotEnabled" class="section-label" style="font-style:italic;display:none">not enabled</span>
+            </div>
+
+            <div id="recIndicator" class="rec-indicator" style="display:none">
+              <span class="rec-ping"></span>
+              <span class="rec-label">Recording</span>
+              <span class="rec-id" id="recEpisodeId"></span>
+            </div>
+
+            <div id="recMeta" style="display:flex;flex-direction:column;gap:6px">
+              <div class="field"><label>Annotator</label><input type="text" id="recAnnotator" placeholder="your name" /></div>
+              <div class="field"><label>Task label</label><input type="text" id="recTaskLabel" placeholder="e.g. pick_cup" /></div>
+              <div class="field"><label>Task description</label><input type="text" id="recTaskDesc" placeholder="natural-language instruction" /></div>
+            </div>
+
+            <div class="btn-row" id="recBtns">
+              <button class="btn btn-green btn-sm" id="recStartBtn">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/></svg>
+                Start
+              </button>
+              <button class="btn btn-outline btn-sm" id="recSaveBtn">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="18" height="18" rx="1"/></svg>
+                Save
+              </button>
+              <button class="btn btn-orange btn-sm" id="recDiscardBtn">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
+                Discard
+              </button>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Observations card -->
+      <div class="card" id="obsCard">
+        <div class="card-header">
+          <span class="card-title">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 5c-6 0-10 7-10 7s4 7 10 7 10-7 10-7-4-7-10-7z"/></svg>
+            Observations
+          </span>
+        </div>
+        <div class="card-body" style="display:flex;flex-direction:column;gap:10px">
+
+          <div style="display:flex;flex-direction:column;gap:4px" id="obsLeaderBlock">
+            <span class="section-label" id="obsLeaderHeader">Exoskeleton joints (rad)</span>
+            <div class="obs-row"><span class="obs-lbl">Left</span><span class="obs-val" id="obsLeaderLeft">—</span></div>
+            <div class="obs-row"><span class="obs-lbl">Right</span><span class="obs-val" id="obsLeaderRight">—</span></div>
+            <div class="obs-row" id="obsLeaderTorsoRow" style="display:none"><span class="obs-lbl">Torso</span><span class="obs-val" id="obsLeaderTorso">—</span></div>
+          </div>
+
+          <div style="display:flex;flex-direction:column;gap:4px" id="obsRobotBlock">
+            <span class="section-label">Robot joints (rad)</span>
+            <div class="obs-row"><span class="obs-lbl">Left</span><span class="obs-val" id="obsRobotLeft">—</span></div>
+            <div class="obs-row"><span class="obs-lbl">Right</span><span class="obs-val" id="obsRobotRight">—</span></div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Sensors card -->
+      <div class="card" id="sensorsCard">
+        <div class="card-header">
+          <span class="card-title">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12a8 8 0 0116 0"/><path d="M8 12a4 4 0 018 0"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/></svg>
+            Sensors
+          </span>
+        </div>
+        <div class="card-body" style="display:flex;flex-direction:column;gap:4px" id="sensorsBody">
+          <!-- populated by render() -->
+        </div>
+      </div>
+    </div><!-- /left-col -->
+
+    <!-- Camera 1 -->
+    <div>
+      <div class="card camera-card">
+        <div class="camera-header">
+          <span class="camera-title">CAMERA 1</span>
+          <span id="cam1Status" class="cam-inactive">Inactive</span>
+        </div>
+        <div class="canvas-wrap">
+          <canvas id="cam1Canvas"></canvas>
+          <div class="canvas-placeholder" id="cam1Msg">Waiting for robot</div>
+        </div>
+        <div class="cam-id">camera_1</div>
+      </div>
+    </div>
+
+    <!-- Camera 2 -->
+    <div>
+      <div class="card camera-card">
+        <div class="camera-header">
+          <span class="camera-title">CAMERA 2</span>
+          <span id="cam2Status" class="cam-inactive">Inactive</span>
+        </div>
+        <div class="canvas-wrap">
+          <canvas id="cam2Canvas"></canvas>
+          <div class="canvas-placeholder" id="cam2Msg">Waiting for robot</div>
+        </div>
+        <div class="cam-id">camera_2</div>
+      </div>
+    </div>
+
+  </div><!-- /grid -->
+
+  <!-- Debug panel -->
+  <div id="debugPanel" style="display:none">
+    <div class="card debug-card">
+      <div class="card-header"><span class="card-title">Debug — Process Logs</span></div>
+      <div class="card-body">
+        <div class="debug-tabs" id="debugTabs"></div>
+        <div class="debug-log" id="debugLog"></div>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<!-- Diagnosis modal -->
+<div class="modal-overlay" id="diagOverlay" style="display:none">
+  <div class="modal">
+    <div class="modal-header">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+      <span class="modal-htitle">DIAGNOSIS — Teleop cannot start</span>
+      <button class="modal-close" id="diagClose">✕</button>
+    </div>
+    <div class="modal-body" id="diagBody"></div>
+    <div class="modal-footer">
+      <button class="btn btn-outline btn-sm" id="diagDismiss">Dismiss</button>
+    </div>
+  </div>
+</div>
+
+<!-- Doctor modal -->
+<div class="modal-overlay" id="doctorOverlay" style="display:none">
+  <div class="modal doctor-modal">
+    <div class="modal-header doctor-header">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 3v4a6 6 0 0012 0V3"/><path d="M6 3h3M15 3h3"/><path d="M12 13v4a4 4 0 004 4 3 3 0 003-3v-3"/><circle cx="19" cy="12" r="2"/></svg>
+      <span class="modal-htitle doctor-htitle">DOCTOR — Recovery actions</span>
+      <button class="modal-close doctor-close" id="doctorClose">✕</button>
+    </div>
+    <div class="modal-body">
+      <p style="color:var(--text-muted); font-size:11px; margin:0">
+        Teleop has been stopped. Run one or more recovery actions, then dismiss
+        this window to restart teleop.
+      </p>
+      <div class="doctor-actions">
+        <button class="btn btn-outline doctor-action" id="docClearErrBtn">
+          <span class="doctor-action-label">Clear errors</span>
+          <span class="doctor-action-status" id="docClearErrStatus"></span>
+        </button>
+        <button class="btn btn-outline doctor-action" id="docInitArmBtn">
+          <span class="doctor-action-label">Init arms to zero pose</span>
+          <span class="doctor-action-status" id="docInitArmStatus"></span>
+        </button>
+        <button class="btn btn-outline doctor-action" id="docHandOpenBtn">
+          <span class="doctor-action-label">Open hands</span>
+          <span class="doctor-action-status" id="docHandOpenStatus"></span>
+        </button>
+        <button class="btn btn-outline doctor-action" id="docHandCloseBtn">
+          <span class="doctor-action-label">Close hands</span>
+          <span class="doctor-action-status" id="docHandCloseStatus"></span>
+        </button>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline btn-sm" id="doctorDismiss">Dismiss</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ── Persistence ───────────────────────────────────────────────────────────
+  const ls = {
+    get: (k, fb) => { try { return localStorage.getItem(k) ?? fb } catch { return fb } },
+    set: (k, v)  => { try { localStorage.setItem(k, v) } catch {} },
+  };
+
+  let apiUrl = ls.get('apiUrl', 'http://localhost:5006').replace(/\/$/, '');
+  let dark   = ls.get('theme', 'light') === 'dark';
+
+  function toWs(url) { return url.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:'); }
+
+  // ── App state ─────────────────────────────────────────────────────────────
+  let S = {
+    controlState: 'BOOT', isRecording: false, episodeId: null,
+    softwareEstop: false, recordMode: false, teleopRunning: false,
+    errorState: null, activeComponents: [],
+  };
+  let loading = false;
+  let diagOpen = false;
+  let diagDismissed = false;
+
+  const el = id => document.getElementById(id);
+
+  // ── Dark mode ─────────────────────────────────────────────────────────────
+  function applyTheme() {
+    document.body.classList.toggle('dark', dark);
+    el('moonIcon').style.display = dark ? 'none' : '';
+    el('sunIcon').style.display  = dark ? '' : 'none';
+  }
+  applyTheme();
+  el('darkBtn').onclick = () => { dark = !dark; ls.set('theme', dark ? 'dark' : 'light'); applyTheme(); };
+
+  // ── Settings ──────────────────────────────────────────────────────────────
+  let settingsOpen = false;
+  el('settingsBtn').onclick = () => {
+    settingsOpen = !settingsOpen;
+    el('settingsPanel').style.display = settingsOpen ? '' : 'none';
+    el('settingsBtn').classList.toggle('active', settingsOpen);
+  };
+  el('apiInput').value = apiUrl;
+  el('recAnnotator').value = ls.get('rec_annotator', '');  // restore sticky annotator
+
+  function applyApiUrl(raw) {
+    let url = raw.trim().replace(/\/$/, '');
+    if (url && !/^https?:\/\//i.test(url)) url = 'http://' + url;
+    try {
+      const p = new URL(url);
+      if (!p.port) url = `${p.protocol}//${p.hostname}:5006${p.pathname === '/' ? '' : p.pathname}`;
+    } catch {}
+    apiUrl = url;
+    el('apiInput').value = url;
+    ls.set('apiUrl', url);
+    reconnectAll();
+  }
+  el('applyUrlBtn').onclick = () => applyApiUrl(el('apiInput').value);
+  el('apiInput').onkeydown  = e => { if (e.key === 'Enter') applyApiUrl(el('apiInput').value); };
+
+  // ── State WebSocket ───────────────────────────────────────────────────────
+  let stateWs = null, stateRetry = null;
+
+  function connectStateWs() {
+    if (stateRetry) { clearTimeout(stateRetry); stateRetry = null; }
+    if (stateWs)    { try { stateWs.close(); } catch {} }
+    let ws;
+    try { ws = new WebSocket(`${toWs(apiUrl)}/ws/state`); }
+    catch { stateRetry = setTimeout(connectStateWs, 2000); return; }
+    stateWs = ws;
+
+    ws.onopen = () => {
+      el('connDot').classList.add('connected');
+      el('connDot').title = 'Backend connected';
+    };
+    ws.onmessage = ev => {
+      try {
+        const msg = JSON.parse(ev.data);
+        const topics = Object.values(msg.robots ?? {})[0] ?? [];
+        const get = t => topics.find(x => x.topic === t)?.data;
+
+        const prevCs = S.controlState;
+        const cs = get('control_state') ?? 'BOOT';
+        const estopData = get('estop_state');
+        S = {
+          controlState:    cs,
+          episodeId:       get('episode_id') || null,
+          recordMode:      get('record_mode') ?? false,
+          teleopRunning:   get('teleop_running') ?? false,
+          errorState:      get('error_state') ?? null,
+          activeComponents:get('active_components') ?? [],
+          softwareEstop:   estopData?.software_estop ?? (cs === 'PAUSE'),
+          isRecording:     cs === 'RECORD',
+          exoLeft:         get('observation/exo/left_arm') ?? null,
+          exoRight:        get('observation/exo/right_arm') ?? null,
+          robotLeft:       get('observation/state/left_arm') ?? null,
+          robotRight:      get('observation/state/right_arm') ?? null,
+          cmdLeft:         get('observation/command/left_arm') ?? null,
+          cmdRight:        get('observation/command/right_arm') ?? null,
+          cmdTorso:        get('observation/command/torso') ?? null,
+          sensorTopics:    get('sensor_topics') ?? null,
+          leaderMode:      get('leader_mode') ?? 'exoskeleton',
+        };
+        render(prevCs);
+      } catch {}
+    };
+    ws.onerror = () => { el('connDot').classList.remove('connected'); el('connDot').title = 'Backend disconnected'; };
+    ws.onclose = () => {
+      el('connDot').classList.remove('connected'); el('connDot').title = 'Backend disconnected';
+      stateRetry = setTimeout(connectStateWs, 2000);
+    };
+  }
+
+  // ── Camera streams ────────────────────────────────────────────────────────
+  const cams = {
+    camera_1: { ws: null, canvas: el('cam1Canvas'), msg: el('cam1Msg'), status: el('cam1Status') },
+    camera_2: { ws: null, canvas: el('cam2Canvas'), msg: el('cam2Msg'), status: el('cam2Status') },
+  };
+
+  function startCam(id) {
+    const c = cams[id];
+    if (c.ws?.readyState === WebSocket.OPEN) return;
+    stopCam(id);
+    let ws;
+    try { ws = new WebSocket(`${toWs(apiUrl)}/ws/sensors/stream/${id}`); } catch { return; }
+    ws.binaryType = 'arraybuffer';
+    c.ws = ws;
+    ws.onopen  = () => { c.status.textContent = '● Live'; c.status.className = 'cam-live'; c.msg.style.display = 'none'; };
+    ws.onerror = () => { c.status.textContent = 'Error';  c.status.className = 'cam-inactive'; };
+    ws.onclose = () => { c.status.textContent = 'Inactive'; c.status.className = 'cam-inactive'; c.msg.style.display = ''; };
+    ws.onmessage = ev => {
+      const draw = buf => {
+        const url = URL.createObjectURL(new Blob([buf], { type: 'image/jpeg' }));
+        const img = new Image();
+        img.onload = () => {
+          c.canvas.width  = img.width;
+          c.canvas.height = img.height;
+          c.canvas.getContext('2d').drawImage(img, 0, 0);
+          URL.revokeObjectURL(url);
+        };
+        img.onerror = () => URL.revokeObjectURL(url);
+        img.src = url;
+      };
+      if (ev.data instanceof Blob) ev.data.arrayBuffer().then(draw);
+      else draw(ev.data);
+    };
+  }
+
+  function stopCam(id) {
+    const c = cams[id];
+    if (c.ws) { try { c.ws.close(); } catch {} c.ws = null; }
+    c.status.textContent = 'Inactive'; c.status.className = 'cam-inactive';
+    c.msg.style.display = '';
+  }
+
+  // ── Debug / log panel ─────────────────────────────────────────────────────
+  const PROCS = ['app_backend', 'arm_reader', 'joycon_reader', 'paddle_leader', 'command_processor', 'robot_controller', 'mcap_recorder', 'mdp_recorder'];
+  const logBufs = {}; PROCS.forEach(n => { logBufs[n] = []; });
+  let activeTab = 'app_backend', logWs = null, logConn = false, debugOpen = false;
+
+  el('debugBtn').onclick = () => {
+    debugOpen = !debugOpen;
+    el('debugPanel').style.display = debugOpen ? '' : 'none';
+    el('debugBtn').classList.toggle('active', debugOpen);
+    if (debugOpen && !logWs) connectLogsWs();
+    if (debugOpen) { renderTabs(); renderLog(); }
+  };
+
+  function renderTabs() {
+    const wrap = el('debugTabs');
+    wrap.innerHTML = '';
+    PROCS.forEach(name => {
+      const b = document.createElement('button');
+      b.className = 'debug-tab' + (name === activeTab ? ' active' : '');
+      const cnt = logBufs[name].length;
+      b.innerHTML = escHtml(name) + (cnt ? `<span class="cnt">${cnt}</span>` : '');
+      b.onclick = () => { activeTab = name; renderTabs(); renderLog(); };
+      wrap.appendChild(b);
+    });
+    const right = document.createElement('div');
+    right.className = 'debug-tab-right';
+    const dot = document.createElement('span');
+    dot.className = 'debug-conn' + (logConn ? ' on' : '');
+    const clr = document.createElement('button');
+    clr.className = 'debug-clear';
+    clr.textContent = 'clear';
+    clr.onclick = () => { PROCS.forEach(n => { logBufs[n] = []; }); renderTabs(); renderLog(); };
+    right.appendChild(dot);
+    right.appendChild(clr);
+    wrap.appendChild(right);
+  }
+
+  function renderLog() {
+    const logEl = el('debugLog');
+    const entries = logBufs[activeTab] || [];
+    if (!entries.length) { logEl.innerHTML = '<div class="debug-empty">No log output yet.</div>'; return; }
+    const atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
+    logEl.innerHTML = entries.map(line => {
+      const l = line.toLowerCase();
+      let cls = 'l-default';
+      if (l.includes('error') || l.includes('exception') || l.includes('traceback')) cls = 'l-error';
+      else if (l.includes('warn')) cls = 'l-warn';
+      else if (l.includes('success') || l.includes(' ok ') || l.includes('started')) cls = 'l-success';
+      return `<div class="dline"><span class="${cls}">${escHtml(line)}</span></div>`;
+    }).join('');
+    if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function connectLogsWs() {
+    if (logWs) { try { logWs.close(); } catch {} }
+    try { logWs = new WebSocket(`${toWs(apiUrl)}/ws/logs`); } catch { return; }
+    logWs.onopen  = () => { logConn = true;  if (debugOpen) renderTabs(); };
+    logWs.onerror = () => { logConn = false; if (debugOpen) renderTabs(); };
+    logWs.onclose = () => {
+      logConn = false; logWs = null;
+      if (debugOpen) { renderTabs(); setTimeout(() => { if (debugOpen) connectLogsWs(); }, 3000); }
+    };
+    logWs.onmessage = ev => {
+      try {
+        const e = JSON.parse(ev.data);
+        const buf = logBufs[e.source] || (logBufs[e.source] = []);
+        buf.push(e.line);
+        if (buf.length > 2000) buf.shift();
+        if (debugOpen) { renderLog(); renderTabs(); }
+      } catch {}
+    };
+  }
+
+  // ── REST helpers ──────────────────────────────────────────────────────────
+  async function api(path, method, body) {
+    loading = true; updateButtons();
+    el('errorBanner').style.display = 'none';
+    try {
+      const opts = { method, headers: {} };
+      if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+      const res = await fetch(apiUrl + path, opts);
+      if (!res.ok) { const t = await res.text(); throw new Error(`${res.status}: ${t}`); }
+    } catch (e) {
+      el('errorText').textContent = e.message || String(e);
+      el('errorBanner').style.display = '';
+    } finally {
+      loading = false; updateButtons();
+    }
+  }
+
+  el('errorClose').onclick = () => { el('errorBanner').style.display = 'none'; };
+
+  function reconnectAll() {
+    connectStateWs();
+    if (logWs) connectLogsWs();
+    const active = ['ACTIVE', 'RECORD', 'ALIGN'].includes(S.controlState);
+    Object.keys(cams).forEach(id => { stopCam(id); if (active) startCam(id); });
+  }
+
+  // ── Render ────────────────────────────────────────────────────────────────
+  const BADGE = {
+    BOOT:      ['badge-boot',      'Booting'],
+    DIAGNOSIS: ['badge-diagnosis', 'Diagnosis'],
+    ALIGN:     ['badge-align',     'Aligning'],
+    ACTIVE:    ['badge-active',    'Active'],
+    RECORD:    ['badge-record',    'Recording'],
+    PAUSE:     ['badge-pause',     'Paused'],
+  };
+  const COMP_LABELS = {
+    left_arm:'Left Arm', right_arm:'Right Arm', torso:'Torso', head:'Head',
+    left_hand:'Left Hand', right_hand:'Right Hand', chassis:'Chassis',
+  };
+
+  function render(prevCs) {
+    const { controlState: cs, isRecording, episodeId, softwareEstop, recordMode, teleopRunning, activeComponents, leaderMode } = S;
+
+    // Badge
+    const [bc, bl] = BADGE[cs] || BADGE.BOOT;
+    el('stateBadge').className = `badge ${bc}`;
+    el('stateBadge').innerHTML = `<span class="badge-dot"></span>${bl}`;
+
+    el('statusCard').classList.toggle('estop-on', softwareEstop);
+
+    el('estopBtn').style.display      = softwareEstop ? 'none' : '';
+    el('clearEstopBtn').style.display = softwareEstop ? '' : 'none';
+
+    el('teleopVal').innerHTML = teleopRunning
+      ? '<span class="sdot dot-green"></span><span class="c-green">Running</span>'
+      : '<span class="sdot dot-gray"></span><span class="c-gray">Stopped</span>';
+    el('recordVal').innerHTML = recordMode
+      ? '<span class="sdot dot-sky"></span><span class="c-sky">On</span>'
+      : '<span class="sdot dot-gray"></span><span class="c-gray">Off</span>';
+    el('estopVal').innerHTML = softwareEstop
+      ? '<span class="sdot dot-red"></span><span class="c-red">Active</span>'
+      : '<span class="sdot dot-gray"></span><span class="c-gray">Clear</span>';
+
+    el('activeVal').textContent = activeComponents.map(c => COMP_LABELS[c] || c).join(', ') || '—';
+
+    // Observations: format each 7-joint vector to 3 dp, monospace.
+    const fmtJoints = arr => {
+      if (!Array.isArray(arr) || arr.length === 0) return null;
+      return arr.map(v => (typeof v === 'number' ? v.toFixed(3).padStart(7) : String(v))).join('  ');
+    };
+    const setObs = (id, arr) => {
+      const txt = fmtJoints(arr);
+      const elx = el(id);
+      if (txt === null) { elx.textContent = '—'; elx.classList.add('stale'); }
+      else              { elx.textContent = txt; elx.classList.remove('stale'); }
+    };
+    // Leader block adapts to the active leader_mode:
+    //   exoskeleton  → "Exoskeleton joints", sourced from observation/exo/*
+    //   vr / vr_sim  → "VR commands",        sourced from observation/command/*
+    //                   (also shows the torso row, which paddle_leader can drive)
+    const isVR = leaderMode === 'vr' || leaderMode === 'vr_sim';
+    el('obsLeaderHeader').textContent = isVR ? 'VR commands (rad)' : 'Exoskeleton joints (rad)';
+    el('obsLeaderTorsoRow').style.display = isVR ? '' : 'none';
+    if (isVR) {
+      setObs('obsLeaderLeft',  S.cmdLeft);
+      setObs('obsLeaderRight', S.cmdRight);
+      setObs('obsLeaderTorso', S.cmdTorso);
+    } else {
+      setObs('obsLeaderLeft',  S.exoLeft);
+      setObs('obsLeaderRight', S.exoRight);
+    }
+    // Robot joints block — meaningless in vr_sim since there's no robot.
+    el('obsRobotBlock').style.display = leaderMode === 'vr_sim' ? 'none' : '';
+    setObs('obsRobotLeft', S.robotLeft);
+    setObs('obsRobotRight',S.robotRight);
+
+    // Sensors card is meaningless in vr_sim — no robot, no streams.
+    el('sensorsCard').style.display = leaderMode === 'vr_sim' ? 'none' : '';
+
+    // Sensors: one row per topic. Two badges — Live/Inactive (is the topic
+    // publishing right now?) and Recorded/Not recorded (is the active robot
+    // config configured to save it?).
+    const SENSOR_LABELS = [
+      ['sensors/head_camera/left_rgb',   'Head camera L'],
+      ['sensors/head_camera/right_rgb',  'Head camera R'],
+      ['sensors/head_camera/depth',      'Head camera depth'],
+      ['sensors/left_wrist_camera/rgb',  'Left wrist camera'],
+      ['sensors/right_wrist_camera/rgb', 'Right wrist camera'],
+      ['state/wrench/left',              'Wrench L'],
+      ['state/wrench/right',             'Wrench R'],
+    ];
+    const sensorsBody = el('sensorsBody');
+    const sensors = S.sensorTopics || {};
+    sensorsBody.innerHTML = SENSOR_LABELS.map(([key, label]) => {
+      const s = sensors[key] || {};
+      const live     = s.live === true;
+      const recorded = s.recorded === true;
+      const liveDot = live ? 'dot-green' : 'dot-gray';
+      const liveCls = live ? 'c-green'   : 'c-gray';
+      const liveTxt = live ? 'Live'      : 'Inactive';
+      const recDot = recorded ? 'dot-sky' : 'dot-gray';
+      const recCls = recorded ? 'c-sky'   : 'c-gray';
+      const recTxt = recorded ? 'Recorded' : 'Not recorded';
+      return `<div class="obs-row" style="width:100%;gap:10px">
+        <span class="obs-lbl" style="width:auto;flex:1">${label}</span>
+        <span style="display:inline-flex;align-items:center;gap:4px"><span class="sdot ${liveDot}"></span><span class="${liveCls}">${liveTxt}</span></span>
+        <span style="display:inline-flex;align-items:center;gap:4px"><span class="sdot ${recDot}"></span><span class="${recCls}">${recTxt}</span></span>
+      </div>`;
+    }).join('');
+
+    // Cameras
+    const camActive = cs === 'ACTIVE' || cs === 'RECORD' || cs === 'ALIGN';
+    Object.keys(cams).forEach(id => {
+      if (camActive) startCam(id); else stopCam(id);
+      cams[id].msg.textContent = camActive ? 'Connecting…' : 'Waiting for robot';
+    });
+
+    el('recIndicator').style.display = isRecording ? '' : 'none';
+    if (isRecording && episodeId) el('recEpisodeId').textContent = episodeId;
+
+    el('recNotEnabled').style.display = (!recordMode && teleopRunning) ? '' : 'none';
+
+    // Diagnosis modal: open on transition into DIAGNOSIS, close on exit
+    if (cs === 'DIAGNOSIS' && !diagOpen && !diagDismissed) { diagOpen = true; openDiagModal(); }
+    else if (cs !== 'DIAGNOSIS' && (diagOpen || diagDismissed)) { diagOpen = false; diagDismissed = false; el('diagOverlay').style.display = 'none'; }
+
+    updateButtons();
+  }
+
+  function updateButtons() {
+    const { controlState: cs, isRecording, softwareEstop, recordMode, teleopRunning } = S;
+    const canStart = !teleopRunning && !softwareEstop && !loading;
+    const robotReady = cs === 'ACTIVE' || cs === 'RECORD';
+    const canRec = recordMode && robotReady && teleopRunning && !loading;
+
+    el('startTeleopBtn').disabled  = !canStart;
+    el('startTeleopBtn').className = `btn ${canStart ? 'btn-green' : 'btn-outline'}`;
+    el('startTeleopBtn').innerHTML =
+      `<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>` +
+      `Start` +
+      `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-left:auto;opacity:.6"><polyline points="6 9 12 15 18 9"/></svg>`;
+
+    el('stopTeleopBtn').disabled = !teleopRunning || loading;
+    el('launchBtn').disabled     = loading;
+
+    el('recBtns').style.opacity       = recordMode ? '1' : '0.5';
+    el('recBtns').style.pointerEvents = recordMode ? '' : 'none';
+    el('recStartBtn').disabled  = loading || isRecording || !canRec;
+    el('recStartBtn').className = `btn btn-sm ${canRec && !isRecording ? 'btn-green' : 'btn-outline'}`;
+    el('recSaveBtn').disabled   = loading || !isRecording;
+    el('recDiscardBtn').disabled= loading || !isRecording;
+    // Metadata is captured at episode start; lock the inputs while recording
+    // so the on-screen values always reflect the running episode.
+    ['recAnnotator', 'recTaskLabel', 'recTaskDesc'].forEach(id => {
+      el(id).disabled = isRecording;
+    });
+
+    el('estopBtn').disabled      = loading;
+    el('clearEstopBtn').disabled = loading;
+  }
+
+  // ── Diagnosis modal ───────────────────────────────────────────────────────
+  function openDiagModal() {
+    const es = S.errorState;
+    let html = '';
+    if (es?.message) html += `<p style="font-weight:500">${escHtml(es.message)}</p>`;
+
+    if (es?.diagnostic_checks && Object.keys(es.diagnostic_checks).length) {
+      html += `<div><p class="modal-section">Diagnostic checks</p><div class="diag-table">`;
+      for (const [k, v] of Object.entries(es.diagnostic_checks))
+        html += `<div class="diag-row"><span>${escHtml(k.replace(/_/g,' '))}</span>${v ? '<span class="diag-pass">✓ pass</span>' : '<span class="diag-fail">✗ fail</span>'}</div>`;
+      html += `</div></div>`;
+    }
+    if (es?.component_errors && Object.keys(es.component_errors).length) {
+      html += `<div><p class="modal-section">Component errors</p><div class="diag-table">`;
+      for (const [k, v] of Object.entries(es.component_errors))
+        html += `<div class="diag-row"><span style="color:#dc2626;font-weight:600">${escHtml(k)}</span><span style="color:var(--text-muted)">${escHtml(JSON.stringify(v))}</span></div>`;
+      html += `</div></div>`;
+    }
+    if (es?.missing_topics?.length) {
+      html += `<div><p class="modal-section">Missing topics</p><div class="topic-list">`;
+      es.missing_topics.forEach(t => { html += `<span class="topic-chip">${escHtml(t)}</span>`; });
+      html += `</div></div>`;
+    }
+    if (!es) html = `<p style="color:var(--text-muted);font-style:italic">No diagnostic details available.</p>`;
+
+    el('diagBody').innerHTML = html;
+    el('diagOverlay').style.display = '';
+  }
+
+  const closeDiag = () => { el('diagOverlay').style.display = 'none'; diagOpen = false; diagDismissed = true; };
+  el('diagClose').onclick   = closeDiag;
+  el('diagDismiss').onclick = closeDiag;
+
+  // ── Doctor modal ──────────────────────────────────────────────────────────
+  const DOCTOR_ACTIONS = [
+    { btn: 'docClearErrBtn', status: 'docClearErrStatus', path: '/doctor/clear_error', method: 'POST' },
+    { btn: 'docInitArmBtn',  status: 'docInitArmStatus',  path: '/doctor/init_arm_safe', method: 'POST' },
+    { btn: 'docHandOpenBtn', status: 'docHandOpenStatus', path: '/doctor/hand', method: 'POST', body: { action: 'open' } },
+    { btn: 'docHandCloseBtn',status: 'docHandCloseStatus',path: '/doctor/hand', method: 'POST', body: { action: 'close' } },
+  ];
+
+  async function runDoctorAction(spec) {
+    const btn = el(spec.btn), status = el(spec.status);
+    DOCTOR_ACTIONS.forEach(a => { el(a.btn).disabled = true; });
+    status.textContent = 'running…'; status.className = 'doctor-action-status';
+    try {
+      const opts = { method: spec.method, headers: {} };
+      if (spec.body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(spec.body); }
+      const res = await fetch(apiUrl + spec.path, opts);
+      if (!res.ok) { const t = await res.text(); throw new Error(`${res.status}: ${t}`); }
+      const data = await res.json().catch(() => ({}));
+      if (data && data.failed && data.failed.length) {
+        status.textContent = `partial (${data.failed.length} failed)`;
+        status.className = 'doctor-action-status err';
+      } else {
+        status.textContent = 'done';
+        status.className = 'doctor-action-status ok';
+      }
+    } catch (e) {
+      status.textContent = (e.message || String(e)).slice(0, 80);
+      status.className = 'doctor-action-status err';
+    } finally {
+      DOCTOR_ACTIONS.forEach(a => { el(a.btn).disabled = false; });
+    }
+  }
+
+  async function openDoctor() {
+    // Stop teleop first and wait for confirmation, then reveal the modal.
+    el('doctorBtn').disabled = true;
+    try {
+      await api('/teleop/stop', 'POST');
+    } finally {
+      el('doctorBtn').disabled = false;
+    }
+    DOCTOR_ACTIONS.forEach(a => {
+      const s = el(a.status);
+      s.textContent = ''; s.className = 'doctor-action-status';
+      el(a.btn).disabled = false;
+    });
+    el('doctorOverlay').style.display = '';
+  }
+
+  const closeDoctor = () => { el('doctorOverlay').style.display = 'none'; };
+  el('doctorBtn').onclick     = openDoctor;
+  el('doctorClose').onclick   = closeDoctor;
+  el('doctorDismiss').onclick = closeDoctor;
+  DOCTOR_ACTIONS.forEach(spec => { el(spec.btn).onclick = () => runDoctorAction(spec); });
+
+  // ── Control actions ───────────────────────────────────────────────────────
+  el('startTeleopBtn').onclick = () => {
+    el('teleopBtnRow').style.display = 'none';
+    el('launchForm').style.display = '';
+  };
+  el('cancelLaunchBtn').onclick = () => {
+    el('launchForm').style.display = 'none';
+    el('teleopBtnRow').style.display = '';
+  };
+  el('fRecordMode').onchange = () => {
+    el('fRecordFormatRow').style.display = el('fRecordMode').checked ? '' : 'none';
+  };
+  el('fLeaderMode').onchange = () => {
+    // VR sim-only mode has no robot in the loop, so recording is meaningless.
+    const isSim = el('fLeaderMode').value === 'vr_sim';
+    el('fRecordMode').disabled = isSim;
+    if (isSim) {
+      el('fRecordMode').checked = false;
+      el('fRecordFormatRow').style.display = 'none';
+    }
+  };
+  el('launchBtn').onclick = async () => {
+    el('launchForm').style.display = 'none';
+    el('teleopBtnRow').style.display = '';
+    await api('/teleop/start', 'POST', {
+      record_mode: el('fRecordMode').checked,
+      recording_format: el('fRecordFormat').value,
+      leader_mode: el('fLeaderMode').value,
+      env: {
+        ROBOT_NAME:   el('fRobotName').value.trim(),
+        ROBOT_CONFIG: el('fRobotConfig').value.trim(),
+        ZENOH_CONFIG: el('fZenohConfig').value.trim(),
+      },
+    });
+  };
+  el('stopTeleopBtn').onclick = () => api('/teleop/stop',  'POST');
+  el('estopBtn').onclick      = () => api('/robots/estop', 'POST');
+  el('clearEstopBtn').onclick = () => api('/robots/estop', 'DELETE');
+  el('recStartBtn').onclick   = () => {
+    const operator = el('recAnnotator').value.trim();
+    ls.set('rec_annotator', operator);  // sticky for the session
+    api('/record/start', 'POST', { metadata: {
+      operator,
+      task_label:       el('recTaskLabel').value.trim(),
+      task_instruction: el('recTaskDesc').value.trim(),
+    }});
+  };
+  el('recSaveBtn').onclick    = () => api('/record/stop',  'POST', { is_success: true });
+  el('recDiscardBtn').onclick = () => api('/record/stop',  'POST', { is_success: false });
+
+  function escHtml(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  // ── Boot ──────────────────────────────────────────────────────────────────
+  connectStateWs();
+  renderTabs();
+  updateButtons();
+
+})();
+</script>
+</body>
 </html>

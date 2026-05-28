@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Leader program for reading JoyCon controller inputs."""
 
+import os
 import sys
 import time
 from dataclasses import asdict
-from typing import Optional
+from typing import Dict, Optional
 import tyro
 
 from joycon_lib import DualJoyCon, Button
@@ -16,6 +17,7 @@ from omniteleop.common import JoyConData, get_config
 from omniteleop.common.logging import setup_logging
 from omniteleop.common.debug_display import get_debug_display
 from loguru import logger
+
 
 class JoyConReader:
     """Reads JoyCon inputs and publishes via Zenoh using Node interface."""
@@ -50,6 +52,9 @@ class JoyConReader:
 
         # JoyCon interface
         self.joycons = None
+
+        # Set to True when run() exits due to a detected disconnect.
+        self._disconnect_exit = False
 
         # Zenoh publisher (will be created through Node)
         self.publisher = None
@@ -124,6 +129,58 @@ class JoyConReader:
             return 0.0
         return value
 
+    def _check_joycon_fds(self) -> Dict[str, bool]:
+        """Return per-side liveness based on evdev device node existence.
+
+        ``DualJoyCon.is_connected()`` only checks whether the Python handle is
+        non-None, which never flips when a Joy-Con drops off Bluetooth. The
+        kernel, however, removes ``/dev/input/eventN`` immediately on radio
+        disconnect — so checking the path is a fast, reliable signal.
+        """
+        result = {"left": False, "right": False}
+        for side in ("left", "right"):
+            joycon = getattr(self.joycons, f"{side}_joycon", None)
+            if joycon is None:
+                continue
+            evdev_device = getattr(getattr(joycon, "device", None), "device", None)
+            path = getattr(evdev_device, "path", None)
+            if path and os.path.exists(path):
+                result[side] = True
+        return result
+
+    def _zero_state(self) -> dict:
+        """Return a neutral JoyCon state with all buttons released and sticks centered."""
+        return {
+            "left": {
+                "buttons": {
+                    "up": False,
+                    "down": False,
+                    "left": False,
+                    "right": False,
+                    "l": False,
+                    "zl": False,
+                    "minus": False,
+                    "capture": False,
+                    "stick": False,
+                },
+                "stick": {"x": 0.0, "y": 0.0},
+            },
+            "right": {
+                "buttons": {
+                    "a": False,
+                    "b": False,
+                    "x": False,
+                    "y": False,
+                    "r": False,
+                    "zr": False,
+                    "plus": False,
+                    "home": False,
+                    "stick": False,
+                },
+                "stick": {"x": 0.0, "y": 0.0},
+            },
+        }
+
     def _read_joycon_state(self) -> dict:
         """Read current JoyCon state."""
         data = {
@@ -190,6 +247,26 @@ class JoyConReader:
 
         try:
             while True:
+                status = self._check_joycon_fds()
+                if not (status["left"] and status["right"]):
+                    dropped = [s for s in ("left", "right") if not status[s]]
+                    logger.error(
+                        f"JoyCon disconnect detected ({', '.join(dropped)}); "
+                        "publishing zero state and exiting"
+                    )
+                    zero = self._zero_state()
+                    self.publisher.publish(
+                        asdict(
+                            JoyConData(
+                                timestamp_ns=time.time_ns(),
+                                left=zero["left"],
+                                right=zero["right"],
+                            )
+                        )
+                    )
+                    self._disconnect_exit = True
+                    break
+
                 # Read JoyCon state
                 state = self._read_joycon_state()
 
@@ -235,6 +312,7 @@ class JoyConReader:
 
         logger.info("JoyCon reader stopped")
 
+
 def main(
     namespace: str = "",
     publish_rate: Optional[int] = None,
@@ -274,7 +352,10 @@ def main(
     # Run directly (no threading needed)
     reader.run()
 
+    if reader._disconnect_exit:
+        return 1
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(tyro.cli(main))

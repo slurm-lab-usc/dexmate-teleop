@@ -10,6 +10,7 @@ from .base_controller import AbstractBaseController
 from .torso_controller import AbstractTorsoController
 from .hand_controller import AbstractHandController
 
+
 def create_controller(device_type: str, config: dict = None) -> AbstractController:
     """Factory function to create appropriate controller.
 
@@ -29,10 +30,13 @@ def create_controller(device_type: str, config: dict = None) -> AbstractControll
         from .joycon.controller import JoyConController
 
         return JoyConController(config)
+    elif device_type == "vr":
+        from .vr.controller import VRController
 
         return VRController(config)
     else:
         raise ValueError(f"Unknown device type: {device_type}")
+
 
 __all__ = [
     # Commands

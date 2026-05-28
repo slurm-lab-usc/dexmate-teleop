@@ -1,90 +1,92 @@
 #!/usr/bin/env bash
-# Launch OmniTeleop backend + frontend together.
+# Launch the OmniTeleop backend.  The frontend is served by the backend itself
+# at http://localhost:5006 — no separate npm/node process is needed.
 #
 # Usage:
-#   ./launch.sh                # normal mode
-#   ./launch.sh --rpi-mode     # RPi leader mode (bypasses local hw checks)
-#   ./launch.sh --port 3000    # custom frontend port (default 5173)
+#   ./launch.sh                                  # normal mode
+#   ./launch.sh --rpi-mode                       # RPi leader mode (bypasses local hw checks)
+#   ./launch.sh --lock-hand-collision-avoidance  # freeze hands in MotionManager
+#                                                # collision model at open pose
+#   ./launch.sh --unlock-torso                   # let paddle_leader IK recruit torso
+#                                                # joints (vr / vr_sim modes; off by
+#                                                # default so the same launch works
+#                                                # on upper-body-only vega_1u)
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-FRONTEND_DIR="$SCRIPT_DIR/frontend"
 
-# Ensure node/npx are on PATH when installed in a non-standard location.
-for _node_dir in "$HOME/nodejs/bin" "$HOME/.nvm/versions/node"/*/bin; do
-  [ -x "$_node_dir/node" ] && export PATH="$_node_dir:$PATH" && break
-done
-
-PORT=5173
 RPI_FLAG=""
-
+LOCK_HAND_FLAG=""
+UNLOCK_TORSO_FLAG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --rpi-mode) RPI_FLAG="--rpi-mode"; shift ;;
-    --port)     PORT="$2"; shift 2 ;;
+    --lock-hand-collision-avoidance) LOCK_HAND_FLAG="--lock-hand-collision-avoidance"; shift ;;
+    --unlock-torso) UNLOCK_TORSO_FLAG="--unlock-torso"; shift ;;
     *)
       echo "Unknown argument: $1"
-      echo "Usage: $0 [--rpi-mode] [--port N]"
+      echo "Usage: $0 [--rpi-mode] [--lock-hand-collision-avoidance] [--unlock-torso]"
       exit 1
       ;;
   esac
 done
 
 BACKEND_PID=""
-FRONTEND_PID=""
-
-kill_pid() {
-  local pid="$1" name="$2"
-  [[ -z "$pid" ]] && return
-  if kill -0 "$pid" 2>/dev/null; then
-    echo "→ Stopping $name (pid $pid)..."
-    kill -TERM "$pid" 2>/dev/null || true
-    # Wait up to 5 s then force-kill
-    for _ in $(seq 1 10); do
-      kill -0 "$pid" 2>/dev/null || return
-      sleep 0.5
-    done
-    echo "→ Force-killing $name (pid $pid)..."
-    kill -KILL "$pid" 2>/dev/null || true
-  fi
-}
 
 cleanup() {
   echo ""
-  kill_pid "$BACKEND_PID"  "backend"
-  kill_pid "$FRONTEND_PID" "frontend"
+  if [[ -n "$BACKEND_PID" ]] && kill -0 "$BACKEND_PID" 2>/dev/null; then
+    echo "→ Stopping backend (pid $BACKEND_PID)..."
+    kill -TERM "$BACKEND_PID" 2>/dev/null || true
+    for _ in $(seq 1 10); do
+      kill -0 "$BACKEND_PID" 2>/dev/null || break
+      sleep 0.5
+    done
+    kill -KILL "$BACKEND_PID" 2>/dev/null || true
+  fi
   echo "→ Done."
 }
 trap cleanup EXIT INT TERM
 
-# ── Backend ──────────────────────────────────────────────────────────────────
-echo "→ Starting backend${RPI_FLAG:+ (rpi-mode)}..."
-cd "$REPO_ROOT"
-python -m omniteleop.app.backend.app_backend $RPI_FLAG &
-BACKEND_PID=$!
-
-# ── Frontend ─────────────────────────────────────────────────────────────────
-echo "→ Starting frontend on port $PORT..."
-cd "$FRONTEND_DIR"
-if [ ! -d node_modules ]; then
-  echo "→ Installing frontend dependencies..."
-  if command -v npm &>/dev/null; then
-    npm install
-  else
-    echo "Error: npm not found"; exit 1
+# ── Kill stale teleop processes from previous runs ───────────────────────────
+# Covers every subprocess spawned by app_backend._build_teleop_commands across
+# all three leader modes:
+#   exoskeleton → arm_reader, joycon_reader, command_processor, robot_controller
+#   vr          → paddle_leader, robot_controller
+#   vr_sim      → paddle_leader
+# Plus the recorder subprocesses (mcap_recorder, mdp_recorder), which run as
+# `python -m omniteleop.record.<module>` so we match the module path too.
+STALE_PATTERN="joycon_reader\.py|arm_reader\.py|robot_controller\.py|command_processor\.py|paddle_leader\.py|omniteleop\.record\.(mcap|mdp)_recorder"
+STALE_PIDS=$(pgrep -f "$STALE_PATTERN" || true)
+if [[ -n "$STALE_PIDS" ]]; then
+  echo "→ Killing stale teleop processes: $STALE_PIDS"
+  # shellcheck disable=SC2086
+  kill -TERM $STALE_PIDS 2>/dev/null || true
+  for _ in $(seq 1 10); do
+    pgrep -f "$STALE_PATTERN" >/dev/null || break
+    sleep 0.5
+  done
+  REMAINING=$(pgrep -f "$STALE_PATTERN" || true)
+  if [[ -n "$REMAINING" ]]; then
+    echo "→ Force-killing leftovers: $REMAINING"
+    # shellcheck disable=SC2086
+    kill -KILL $REMAINING 2>/dev/null || true
   fi
 fi
-npx vite --host 0.0.0.0 --port "$PORT" &
-FRONTEND_PID=$!
+
+# ── Backend ───────────────────────────────────────────────────────────────────
+echo "→ Starting backend${RPI_FLAG:+ (rpi-mode)}..."
+cd "$REPO_ROOT"
+python -m omniteleop.app.backend.app_backend $RPI_FLAG $LOCK_HAND_FLAG $UNLOCK_TORSO_FLAG &
+BACKEND_PID=$!
 
 echo ""
 echo "  Backend  PID : $BACKEND_PID"
-echo "  Frontend PID : $FRONTEND_PID"
-echo "  Frontend URL : http://localhost:${PORT}"
+echo "  App URL      : http://localhost:5006"
 echo ""
-echo "  Press Ctrl+C to stop both."
+echo "  Press Ctrl+C to stop."
 echo ""
 
-wait "$BACKEND_PID" "$FRONTEND_PID"
+wait "$BACKEND_PID"

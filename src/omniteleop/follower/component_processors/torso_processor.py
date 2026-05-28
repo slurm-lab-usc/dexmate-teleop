@@ -12,6 +12,7 @@ from omniteleop.follower.component_processors.base_processor import (
 from omniteleop.follower.input_handlers.base_handler import RobotCommand, CommandMode
 from omniteleop.common.log_utils import suppress_loguru_module
 
+
 class TorsoProcessor(BaseComponentProcessor):
     """Processes torso movement commands.
 

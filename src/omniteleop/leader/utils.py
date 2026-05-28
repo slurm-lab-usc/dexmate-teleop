@@ -1,6 +1,7 @@
 import numpy as np
 import pytransform3d.coordinates as coordinates
 
+
 def project_average_rotation(rot_list: np.ndarray):
     gravity_dir = np.array([0, 0, -1])
 

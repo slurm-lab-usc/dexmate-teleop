@@ -5,6 +5,7 @@ import numpy as np
 from scipy.signal import butter, sosfilt, sosfilt_zi
 from typing import Dict, Optional, Any
 
+
 class ButterworthFilter:
     """Multi-channel Butterworth low-pass filter for robot joint commands."""
 
@@ -82,6 +83,7 @@ class ButterworthFilter:
                 del self.filter_states[key]
         else:
             self.filter_states.clear()
+
 
 class MultiChannelFilter:
     """Wrapper for applying filters to multiple robot components."""

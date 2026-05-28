@@ -6,6 +6,7 @@ These dataclasses define the structure of messages passed via Zenoh.
 from dataclasses import dataclass, field
 from typing import Dict, List, Any
 
+
 @dataclass
 class ExoJointData:
     """Joint positions and velocities from the exoskeleton."""
@@ -24,6 +25,7 @@ class ExoJointData:
         default_factory=list
     )  # Right arm joint velocities in rad/s
 
+
 @dataclass
 class JoyConData:
     """JoyCon controller inputs."""
@@ -32,6 +34,7 @@ class JoyConData:
     left: Dict[str, Any]  # Left controller data
     right: Dict[str, Any]  # Right controller data
 
+
 @dataclass
 class SafeJointCommand:
     """Safety-validated commands for the robot."""
@@ -39,6 +42,7 @@ class SafeJointCommand:
     timestamp_ns: int
     components: Dict[str, Dict[str, List[float]]]  # Component commands
     safety_flags: Dict[str, bool] = field(default_factory=dict)
+
 
 @dataclass
 class PoseData:

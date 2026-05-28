@@ -1,5 +1,6 @@
 from setuptools import setup
 
+
 authors_info = [
     ("Leon Jung", "rwjung@robotis.com"),
     ("Wonho Yun", "ywh@robotis.com"),
