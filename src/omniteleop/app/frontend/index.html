@@ -75,7 +75,7 @@
   main { max-width: 1280px; margin: 0 auto; padding: 24px; display: flex; flex-direction: column; gap: 16px; }
 
   .grid { display: grid; grid-template-columns: 280px 1fr 1fr; gap: 16px; align-items: start; }
-  .left-col { display: flex; flex-direction: column; gap: 12px; }
+  .left-col { display: flex; flex-direction: column; gap: 12px; grid-row: span 2; }
 
   /* ── Cards ── */
   .card {
@@ -270,20 +270,91 @@
   .modal-htitle.doctor-htitle { color: #1e40af; }
   body.dark .modal-htitle.doctor-htitle { color: #bfdbfe; }
   .modal-close.doctor-close { color: #1d4ed8; }
+  .doctor-modal {
+    max-width: 780px;
+    max-height: calc(100vh - 24px);
+    max-height: calc(100dvh - 24px);
+    display: flex;
+    flex-direction: column;
+  }
+  .doctor-modal > .modal-header,
+  .doctor-modal > .modal-footer { flex: 0 0 auto; }
+  .doctor-modal > .modal-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: none;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-gutter: stable;
+  }
   .doctor-actions { display: flex; flex-direction: column; gap: 8px; }
   .doctor-action { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 10px 14px; font-size: 12px; }
   .doctor-action[disabled] { opacity: .6; cursor: wait; }
   .doctor-action-status { font-size: 11px; color: var(--text-muted); }
   .doctor-action-status.ok { color: #059669; }
   .doctor-action-status.err { color: #dc2626; }
+  .doctor-brake-card { border: 1px solid #fdba74; border-radius: 9px; overflow: hidden; background: #fffaf5; }
+  body.dark .doctor-brake-card { background: #24150b; border-color: #9a3412; }
+  .doctor-brake-head { padding: 12px 14px; border-bottom: 1px solid #fed7aa; display: flex; flex-direction: column; gap: 8px; }
+  body.dark .doctor-brake-head { border-color: #7c2d12; }
+  .doctor-brake-title { color: #9a3412; font-size: 12px; font-weight: 700; }
+  body.dark .doctor-brake-title { color: #fdba74; }
+  .doctor-brake-warning { color: #c2410c; font-size: 11px; line-height: 1.45; }
+  body.dark .doctor-brake-warning { color: #fdba74; }
+  .doctor-brake-controls { display: grid; grid-template-columns: minmax(180px,1fr) auto auto auto; gap: 8px; align-items: end; }
+  .doctor-brake-select { display: flex; flex-direction: column; gap: 4px; }
+  .doctor-brake-select label { color: var(--text-muted); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
+  .doctor-brake-select select { width: 100%; height: 32px; padding: 0 9px; border-radius: 7px; border: 1px solid var(--input-border); background: var(--input-bg); color: var(--text); font-size: 12px; }
+  .doctor-brake-confirm { display: flex; align-items: flex-start; gap: 8px; font-size: 11px; line-height: 1.4; cursor: pointer; color: var(--text); }
+  .doctor-brake-confirm input { margin-top: 2px; flex-shrink: 0; }
+  .doctor-brake-message { min-height: 17px; font-size: 11px; font-family: monospace; color: var(--text-muted); }
+  .doctor-brake-message.ok { color: #047857; }
+  .doctor-brake-message.err { color: #dc2626; }
+  .doctor-brake-message.warn { color: #c2410c; font-weight: 600; }
+  .doctor-brake-status {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(300px, 1fr));
+    gap: 10px;
+    padding: 12px 14px 14px;
+    max-height: min(38vh, 340px);
+    overflow: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-gutter: stable both-edges;
+  }
+  .doctor-arm-status { min-width: 0; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; background: var(--surface); }
+  .doctor-arm-status-title { display: flex; justify-content: space-between; align-items: center; padding: 7px 9px; font-size: 11px; font-weight: 700; border-bottom: 1px solid var(--border); background: var(--bg); }
+  .brake-summary { font-size: 10px; font-weight: 700; color: #047857; }
+  .brake-summary.released { color: #dc2626; }
+  .brake-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-family: monospace; font-size: 10px; }
+  .brake-table th, .brake-table td { padding: 5px 7px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .brake-table th { color: var(--text-muted); font-weight: 600; background: var(--surface); }
+  .brake-table tr:last-child td { border-bottom: 0; }
+  .brake-table tr.outside td { color: #c2410c; background: rgba(255,247,237,.8); }
+  body.dark .brake-table tr.outside td { background: rgba(124,45,18,.22); }
+  .brake-badge { display: inline-block; padding: 1px 5px; border-radius: 999px; background: #ecfdf5; color: #047857; font-size: 9px; font-weight: 700; }
+  .brake-badge.released { background: #fef2f2; color: #dc2626; }
+  body.dark .brake-badge { background: #052e25; color: #6ee7b7; }
+  body.dark .brake-badge.released { background: #450a0a; color: #fca5a5; }
+  .doctor-motion-lock { padding: 8px 10px; border-radius: 7px; background: #fef2f2; color: #b91c1c; font-size: 11px; font-weight: 600; display: none; }
+  body.dark .doctor-motion-lock { background: #450a0a; color: #fca5a5; }
 
   /* ── Estop highlight ── */
   .card.estop-on { border-color: #fca5a5; background: rgba(254,242,242,.4); }
   body.dark .card.estop-on { background: rgba(127,29,29,.15); border-color: #7f1d1d; }
 
   /* ── Responsive ── */
-  @media (max-width: 900px) { .grid { grid-template-columns: 1fr 1fr; } .left-col { grid-column: 1 / -1; } }
-  @media (max-width: 600px) { .grid { grid-template-columns: 1fr; } main { padding: 12px; } }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr 1fr; } .left-col { grid-column: 1 / -1; grid-row: auto; } }
+  @media (max-width: 600px) {
+    .grid { grid-template-columns: 1fr; }
+    main { padding: 12px; }
+    .doctor-brake-controls { grid-template-columns: 1fr; }
+    .doctor-brake-status {
+      grid-template-columns: minmax(280px, 1fr);
+      max-height: min(44vh, 380px);
+    }
+  }
 </style>
 </head>
 <body>
@@ -384,7 +455,7 @@
 
             <div class="launch-form" id="launchForm" style="display:none">
               <div class="field"><label>ROBOT_NAME</label><input type="text" id="fRobotName" placeholder="auto-detected if empty" /></div>
-              <div class="field"><label>ROBOT_CONFIG</label><input type="text" id="fRobotConfig" placeholder="vega_1p_gripper" /></div>
+              <div class="field"><label>ROBOT_CONFIG</label><input type="text" id="fRobotConfig" value="vega_1u_gripper" placeholder="vega_1u_gripper" /></div>
               <div class="field"><label>ZENOH_CONFIG (cert name)</label><input type="text" id="fZenohConfig" placeholder="auto-detected if empty" /></div>
               <div class="field"><label>Leader Mode</label>
                 <select id="fLeaderMode">
@@ -501,11 +572,11 @@
       </div>
     </div><!-- /left-col -->
 
-    <!-- Camera 1 -->
+    <!-- Head camera left -->
     <div>
       <div class="card camera-card">
         <div class="camera-header">
-          <span class="camera-title">CAMERA 1</span>
+          <span class="camera-title">HEAD LEFT</span>
           <span id="cam1Status" class="cam-inactive">Inactive</span>
         </div>
         <div class="canvas-wrap">
@@ -516,11 +587,11 @@
       </div>
     </div>
 
-    <!-- Camera 2 -->
+    <!-- Head camera right -->
     <div>
       <div class="card camera-card">
         <div class="camera-header">
-          <span class="camera-title">CAMERA 2</span>
+          <span class="camera-title">HEAD RIGHT</span>
           <span id="cam2Status" class="cam-inactive">Inactive</span>
         </div>
         <div class="canvas-wrap">
@@ -528,6 +599,36 @@
           <div class="canvas-placeholder" id="cam2Msg">Waiting for robot</div>
         </div>
         <div class="cam-id">camera_2</div>
+      </div>
+    </div>
+
+    <!-- Wrist camera left -->
+    <div>
+      <div class="card camera-card">
+        <div class="camera-header">
+          <span class="camera-title">WRIST LEFT</span>
+          <span id="wristLeftStatus" class="cam-inactive">Inactive</span>
+        </div>
+        <div class="canvas-wrap">
+          <canvas id="wristLeftCanvas"></canvas>
+          <div class="canvas-placeholder" id="wristLeftMsg">Waiting for camera</div>
+        </div>
+        <div class="cam-id">left_wrist · 10 FPS preview</div>
+      </div>
+    </div>
+
+    <!-- Wrist camera right -->
+    <div>
+      <div class="card camera-card">
+        <div class="camera-header">
+          <span class="camera-title">WRIST RIGHT</span>
+          <span id="wristRightStatus" class="cam-inactive">Inactive</span>
+        </div>
+        <div class="canvas-wrap">
+          <canvas id="wristRightCanvas"></canvas>
+          <div class="canvas-placeholder" id="wristRightMsg">Waiting for camera</div>
+        </div>
+        <div class="cam-id">right_wrist · 10 FPS preview</div>
       </div>
     </div>
 
@@ -574,6 +675,56 @@
         Teleop has been stopped. Run one or more recovery actions, then dismiss
         this window to restart teleop.
       </p>
+      <div class="doctor-brake-card">
+        <div class="doctor-brake-head">
+          <div class="doctor-brake-title">Arm joint brake-release recovery</div>
+          <p class="doctor-brake-warning">
+            Release only one selected joint. Physically support that section of
+            the arm before continuing—the joint may move immediately under
+            gravity. All brake release must be disabled before any other motion.
+          </p>
+          <div class="doctor-brake-controls">
+            <div class="doctor-brake-select">
+              <label for="docBrakeJointSelect">Joint to release</label>
+              <select id="docBrakeJointSelect">
+                <optgroup label="Left arm">
+                  <option value="left_arm:0">L_arm_j1</option>
+                  <option value="left_arm:1">L_arm_j2</option>
+                  <option value="left_arm:2">L_arm_j3</option>
+                  <option value="left_arm:3">L_arm_j4</option>
+                  <option value="left_arm:4">L_arm_j5</option>
+                  <option value="left_arm:5">L_arm_j6</option>
+                  <option value="left_arm:6">L_arm_j7</option>
+                </optgroup>
+                <optgroup label="Right arm">
+                  <option value="right_arm:0">R_arm_j1</option>
+                  <option value="right_arm:1">R_arm_j2</option>
+                  <option value="right_arm:2">R_arm_j3</option>
+                  <option value="right_arm:3">R_arm_j4</option>
+                  <option value="right_arm:4">R_arm_j5</option>
+                  <option value="right_arm:5" selected>R_arm_j6</option>
+                  <option value="right_arm:6">R_arm_j7</option>
+                </optgroup>
+              </select>
+            </div>
+            <button class="btn btn-orange" id="docBrakeReleaseBtn">Release selected</button>
+            <button class="btn btn-outline" id="docBrakeEngageBtn">Disable all release</button>
+            <button class="btn btn-outline" id="docBrakeRefreshBtn">Refresh status</button>
+          </div>
+          <label class="doctor-brake-confirm">
+            <input type="checkbox" id="docBrakeConfirm" />
+            <span>I am physically supporting the selected joint and have the
+            hardware E-stop within immediate reach.</span>
+          </label>
+          <div class="doctor-brake-message" id="docBrakeMessage">
+            Reading all joint states…
+          </div>
+        </div>
+        <div class="doctor-brake-status" id="docBrakeStatus"></div>
+      </div>
+      <div class="doctor-motion-lock" id="docMotionLock">
+        Motion locked: disable all brake release before continuing.
+      </div>
       <div class="doctor-actions">
         <button class="btn btn-outline doctor-action" id="docClearErrBtn">
           <span class="doctor-action-label">Clear errors</span>
@@ -594,6 +745,7 @@
       </div>
     </div>
     <div class="modal-footer">
+      <span id="doctorCloseHint" style="margin-right:auto;color:#dc2626;font-size:11px"></span>
       <button class="btn btn-outline btn-sm" id="doctorDismiss">Dismiss</button>
     </div>
   </div>
@@ -618,11 +770,14 @@
   let S = {
     controlState: 'BOOT', isRecording: false, episodeId: null,
     softwareEstop: false, recordMode: false, teleopRunning: false,
-    errorState: null, activeComponents: [],
+    teleopLifecycle: 'stopped', errorState: null, activeComponents: [],
   };
   let loading = false;
   let diagOpen = false;
   let diagDismissed = false;
+  let doctorBrakeReleaseActive = false;
+  let doctorBrakeStatusKnown = false;
+  let doctorBrakeBusy = false;
 
   const el = id => document.getElementById(id);
 
@@ -689,6 +844,7 @@
           episodeId:       get('episode_id') || null,
           recordMode:      get('record_mode') ?? false,
           teleopRunning:   get('teleop_running') ?? false,
+          teleopLifecycle: get('teleop_lifecycle') ?? (get('teleop_running') ? 'running' : 'stopped'),
           errorState:      get('error_state') ?? null,
           activeComponents:get('active_components') ?? [],
           softwareEstop:   estopData?.software_estop ?? (cs === 'PAUSE'),
@@ -706,8 +862,14 @@
         render(prevCs);
       } catch {}
     };
-    ws.onerror = () => { el('connDot').classList.remove('connected'); el('connDot').title = 'Backend disconnected'; };
+    ws.onerror = () => {
+      if (stateWs !== ws) return;
+      el('connDot').classList.remove('connected');
+      el('connDot').title = 'Backend disconnected';
+    };
     ws.onclose = () => {
+      if (stateWs !== ws) return;
+      stateWs = null;
       el('connDot').classList.remove('connected'); el('connDot').title = 'Backend disconnected';
       stateRetry = setTimeout(connectStateWs, 2000);
     };
@@ -715,44 +877,98 @@
 
   // ── Camera streams ────────────────────────────────────────────────────────
   const cams = {
-    camera_1: { ws: null, canvas: el('cam1Canvas'), msg: el('cam1Msg'), status: el('cam1Status') },
-    camera_2: { ws: null, canvas: el('cam2Canvas'), msg: el('cam2Msg'), status: el('cam2Status') },
+    camera_1: {
+      ws: null, canvas: el('cam1Canvas'), msg: el('cam1Msg'),
+      status: el('cam1Status'), topic: 'sensors/head_camera/left_rgb',
+    },
+    camera_2: {
+      ws: null, canvas: el('cam2Canvas'), msg: el('cam2Msg'),
+      status: el('cam2Status'), topic: 'sensors/head_camera/right_rgb',
+    },
+    left_wrist: {
+      ws: null, canvas: el('wristLeftCanvas'), msg: el('wristLeftMsg'),
+      status: el('wristLeftStatus'), topic: 'sensors/left_wrist_camera/rgb',
+    },
+    right_wrist: {
+      ws: null, canvas: el('wristRightCanvas'), msg: el('wristRightMsg'),
+      status: el('wristRightStatus'), topic: 'sensors/right_wrist_camera/rgb',
+    },
   };
 
   function startCam(id) {
     const c = cams[id];
-    if (c.ws?.readyState === WebSocket.OPEN) return;
+    if (
+      c.ws?.readyState === WebSocket.OPEN ||
+      c.ws?.readyState === WebSocket.CONNECTING
+    ) return;
     stopCam(id);
     let ws;
     try { ws = new WebSocket(`${toWs(apiUrl)}/ws/sensors/stream/${id}`); } catch { return; }
     ws.binaryType = 'arraybuffer';
     c.ws = ws;
-    ws.onopen  = () => { c.status.textContent = '● Live'; c.status.className = 'cam-live'; c.msg.style.display = 'none'; };
-    ws.onerror = () => { c.status.textContent = 'Error';  c.status.className = 'cam-inactive'; };
-    ws.onclose = () => { c.status.textContent = 'Inactive'; c.status.className = 'cam-inactive'; c.msg.style.display = ''; };
+    ws.onopen  = () => {
+      if (c.ws !== ws) return;
+      c.status.textContent = '● Live';
+      c.status.className = 'cam-live';
+      c.msg.style.display = 'none';
+    };
+    ws.onerror = () => {
+      if (c.ws !== ws) return;
+      c.status.textContent = 'Error';
+      c.status.className = 'cam-inactive';
+    };
+    ws.onclose = () => {
+      if (c.ws !== ws) return;
+      c.ws = null;
+      c.status.textContent = 'Inactive';
+      c.status.className = 'cam-inactive';
+      c.msg.style.display = '';
+    };
     ws.onmessage = ev => {
-      const draw = buf => {
+      // Keep at most one not-yet-decoded frame. If rendering falls behind,
+      // replacing pending here prevents preview latency from growing.
+      c.pending = ev.data;
+      if (c.decoding) return;
+      const drawLatest = () => {
+        const buf = c.pending;
+        if (!buf) { c.decoding = false; return; }
+        c.pending = null;
+        c.decoding = true;
         const url = URL.createObjectURL(new Blob([buf], { type: 'image/jpeg' }));
         const img = new Image();
         img.onload = () => {
-          c.canvas.width  = img.width;
-          c.canvas.height = img.height;
-          c.canvas.getContext('2d').drawImage(img, 0, 0);
+          if (c.ws === ws) {
+            c.canvas.width  = img.width;
+            c.canvas.height = img.height;
+            c.canvas.getContext('2d').drawImage(img, 0, 0);
+          }
           URL.revokeObjectURL(url);
+          drawLatest();
         };
-        img.onerror = () => URL.revokeObjectURL(url);
+        img.onerror = () => {
+          URL.revokeObjectURL(url);
+          drawLatest();
+        };
         img.src = url;
       };
-      if (ev.data instanceof Blob) ev.data.arrayBuffer().then(draw);
-      else draw(ev.data);
+      drawLatest();
     };
   }
 
   function stopCam(id) {
     const c = cams[id];
     if (c.ws) { try { c.ws.close(); } catch {} c.ws = null; }
+    c.pending = null;
+    c.decoding = false;
     c.status.textContent = 'Inactive'; c.status.className = 'cam-inactive';
     c.msg.style.display = '';
+  }
+
+  function shouldStartCam(id, sensors = S.sensorTopics || {}, cs = S.controlState) {
+    const isWrist = id === 'left_wrist' || id === 'right_wrist';
+    const topicLive = sensors[cams[id].topic]?.live === true;
+    const controlActive = cs === 'ACTIVE' || cs === 'RECORD' || cs === 'ALIGN';
+    return topicLive || (controlActive && !isWrist);
   }
 
   // ── Debug / log panel ─────────────────────────────────────────────────────
@@ -792,6 +1008,17 @@
     wrap.appendChild(right);
   }
 
+  let logRenderPending = false;
+  function scheduleLogRender() {
+    if (logRenderPending || !debugOpen) return;
+    logRenderPending = true;
+    setTimeout(() => {
+      logRenderPending = false;
+      renderLog();
+      renderTabs();
+    }, 200);
+  }
+
   function renderLog() {
     const logEl = el('debugLog');
     const entries = logBufs[activeTab] || [];
@@ -810,20 +1037,24 @@
 
   function connectLogsWs() {
     if (logWs) { try { logWs.close(); } catch {} }
-    try { logWs = new WebSocket(`${toWs(apiUrl)}/ws/logs`); } catch { return; }
-    logWs.onopen  = () => { logConn = true;  if (debugOpen) renderTabs(); };
-    logWs.onerror = () => { logConn = false; if (debugOpen) renderTabs(); };
-    logWs.onclose = () => {
+    let ws;
+    try { ws = new WebSocket(`${toWs(apiUrl)}/ws/logs`); } catch { return; }
+    logWs = ws;
+    ws.onopen  = () => { if (logWs === ws) { logConn = true; if (debugOpen) renderTabs(); } };
+    ws.onerror = () => { if (logWs === ws) { logConn = false; if (debugOpen) renderTabs(); } };
+    ws.onclose = () => {
+      if (logWs !== ws) return;
       logConn = false; logWs = null;
       if (debugOpen) { renderTabs(); setTimeout(() => { if (debugOpen) connectLogsWs(); }, 3000); }
     };
-    logWs.onmessage = ev => {
+    ws.onmessage = ev => {
+      if (logWs !== ws) return;
       try {
         const e = JSON.parse(ev.data);
         const buf = logBufs[e.source] || (logBufs[e.source] = []);
         buf.push(e.line);
         if (buf.length > 2000) buf.shift();
-        if (debugOpen) { renderLog(); renderTabs(); }
+        scheduleLogRender();
       } catch {}
     };
   }
@@ -850,8 +1081,10 @@
   function reconnectAll() {
     connectStateWs();
     if (logWs) connectLogsWs();
-    const active = ['ACTIVE', 'RECORD', 'ALIGN'].includes(S.controlState);
-    Object.keys(cams).forEach(id => { stopCam(id); if (active) startCam(id); });
+    Object.keys(cams).forEach(id => {
+      stopCam(id);
+      if (shouldStartCam(id)) startCam(id);
+    });
   }
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -869,7 +1102,7 @@
   };
 
   function render(prevCs) {
-    const { controlState: cs, isRecording, episodeId, softwareEstop, recordMode, teleopRunning, activeComponents, leaderMode } = S;
+    const { controlState: cs, isRecording, episodeId, softwareEstop, recordMode, teleopRunning, teleopLifecycle, activeComponents, leaderMode } = S;
 
     // Badge
     const [bc, bl] = BADGE[cs] || BADGE.BOOT;
@@ -881,9 +1114,16 @@
     el('estopBtn').style.display      = softwareEstop ? 'none' : '';
     el('clearEstopBtn').style.display = softwareEstop ? '' : 'none';
 
-    el('teleopVal').innerHTML = teleopRunning
-      ? '<span class="sdot dot-green"></span><span class="c-green">Running</span>'
-      : '<span class="sdot dot-gray"></span><span class="c-gray">Stopped</span>';
+    const lifecycleLabel = {
+      starting: ['dot-sky', 'c-sky', 'Starting'],
+      running: ['dot-green', 'c-green', 'Running'],
+      stopping: ['dot-sky', 'c-sky', 'Stopping'],
+      failed: ['dot-red', 'c-red', 'Failed'],
+      stopped: ['dot-gray', 'c-gray', 'Stopped'],
+    }[teleopLifecycle] || ['dot-gray', 'c-gray', teleopLifecycle];
+    el('teleopVal').innerHTML =
+      `<span class="sdot ${lifecycleLabel[0]}"></span>` +
+      `<span class="${lifecycleLabel[1]}">${lifecycleLabel[2]}</span>`;
     el('recordVal').innerHTML = recordMode
       ? '<span class="sdot dot-sky"></span><span class="c-sky">On</span>'
       : '<span class="sdot dot-gray"></span><span class="c-gray">Off</span>';
@@ -941,7 +1181,7 @@
     ];
     const sensorsBody = el('sensorsBody');
     const sensors = S.sensorTopics || {};
-    sensorsBody.innerHTML = SENSOR_LABELS.map(([key, label]) => {
+    const sensorMarkup = SENSOR_LABELS.map(([key, label]) => {
       const s = sensors[key] || {};
       const live     = s.live === true;
       const recorded = s.recorded === true;
@@ -957,12 +1197,18 @@
         <span style="display:inline-flex;align-items:center;gap:4px"><span class="sdot ${recDot}"></span><span class="${recCls}">${recTxt}</span></span>
       </div>`;
     }).join('');
+    if (sensorsBody.dataset.markup !== sensorMarkup) {
+      sensorsBody.innerHTML = sensorMarkup;
+      sensorsBody.dataset.markup = sensorMarkup;
+    }
 
     // Cameras
-    const camActive = cs === 'ACTIVE' || cs === 'RECORD' || cs === 'ALIGN';
     Object.keys(cams).forEach(id => {
+      const isWrist = id === 'left_wrist' || id === 'right_wrist';
+      const camActive = shouldStartCam(id, sensors, cs);
       if (camActive) startCam(id); else stopCam(id);
-      cams[id].msg.textContent = camActive ? 'Connecting…' : 'Waiting for robot';
+      cams[id].msg.textContent = camActive ? 'Connecting…' :
+        (isWrist ? 'Waiting for camera' : 'Waiting for robot');
     });
 
     el('recIndicator').style.display = isRecording ? '' : 'none';
@@ -978,19 +1224,30 @@
   }
 
   function updateButtons() {
-    const { controlState: cs, isRecording, softwareEstop, recordMode, teleopRunning } = S;
-    const canStart = !teleopRunning && !softwareEstop && !loading;
+    const { controlState: cs, isRecording, softwareEstop, recordMode, teleopRunning, teleopLifecycle } = S;
+    const lifecycleBusy = teleopLifecycle === 'starting' || teleopLifecycle === 'stopping';
+    const canStart =
+      teleopLifecycle === 'stopped' &&
+      !softwareEstop &&
+      !doctorBrakeReleaseActive &&
+      !loading;
     const robotReady = cs === 'ACTIVE' || cs === 'RECORD';
     const canRec = recordMode && robotReady && teleopRunning && !loading;
 
     el('startTeleopBtn').disabled  = !canStart;
     el('startTeleopBtn').className = `btn ${canStart ? 'btn-green' : 'btn-outline'}`;
-    el('startTeleopBtn').innerHTML =
-      `<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>` +
-      `Start` +
-      `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-left:auto;opacity:.6"><polyline points="6 9 12 15 18 9"/></svg>`;
+    if (!el('startTeleopBtn').dataset.initialized) {
+      el('startTeleopBtn').innerHTML =
+        `<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>` +
+        `Start` +
+        `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="margin-left:auto;opacity:.6"><polyline points="6 9 12 15 18 9"/></svg>`;
+      el('startTeleopBtn').dataset.initialized = '1';
+    }
 
-    el('stopTeleopBtn').disabled = !teleopRunning || loading;
+    el('stopTeleopBtn').disabled =
+      !['starting', 'running', 'failed'].includes(teleopLifecycle) ||
+      lifecycleBusy ||
+      loading;
     el('launchBtn').disabled     = loading;
 
     el('recBtns').style.opacity       = recordMode ? '1' : '0.5';
@@ -1049,16 +1306,148 @@
     { btn: 'docHandOpenBtn', status: 'docHandOpenStatus', path: '/doctor/hand', method: 'POST', body: { action: 'open' } },
     { btn: 'docHandCloseBtn',status: 'docHandCloseStatus',path: '/doctor/hand', method: 'POST', body: { action: 'close' } },
   ];
+  const DOCTOR_MOTION_BUTTONS = [
+    'docInitArmBtn', 'docHandOpenBtn', 'docHandCloseBtn',
+  ];
+
+  function setDoctorControls() {
+    const locked = doctorBrakeReleaseActive;
+    const motionBlocked = locked || !doctorBrakeStatusKnown;
+    const confirmed = el('docBrakeConfirm').checked;
+    el('docBrakeJointSelect').disabled = doctorBrakeBusy || locked;
+    el('docBrakeConfirm').disabled = doctorBrakeBusy || locked;
+    el('docBrakeReleaseBtn').disabled =
+      doctorBrakeBusy || locked || !doctorBrakeStatusKnown || !confirmed;
+    el('docBrakeEngageBtn').disabled = doctorBrakeBusy || !locked;
+    el('docBrakeRefreshBtn').disabled = doctorBrakeBusy;
+    DOCTOR_ACTIONS.forEach(spec => {
+      el(spec.btn).disabled =
+        doctorBrakeBusy ||
+        (motionBlocked && DOCTOR_MOTION_BUTTONS.includes(spec.btn));
+    });
+    el('doctorClose').disabled = doctorBrakeBusy || locked;
+    el('doctorDismiss').disabled = doctorBrakeBusy || locked;
+    el('docMotionLock').style.display = motionBlocked ? '' : 'none';
+    el('docMotionLock').textContent = locked
+      ? 'Motion locked: disable all brake release before continuing.'
+      : 'Motion locked: refresh brake-release status before continuing.';
+    el('doctorCloseHint').textContent = locked
+      ? 'Disable all brake release before closing Doctor.'
+      : '';
+    updateButtons();
+  }
+
+  function brakeStatusTable(title, armStatus) {
+    if (!armStatus) {
+      return `<div class="doctor-arm-status"><div class="doctor-arm-status-title">` +
+        `<span>${escHtml(title)}</span><span class="brake-summary released">Unavailable</span>` +
+        `</div></div>`;
+    }
+    const summary = armStatus.enabled ? 'RELEASE ACTIVE' : 'ALL RELEASE OFF';
+    const rows = (armStatus.joints || []).map(joint => {
+      const limits = Array.isArray(joint.limits_rad) ? joint.limits_rad : [];
+      const q = Number(joint.position_rad);
+      const lo = Number(limits[0]), hi = Number(limits[1]);
+      const limitText = Number.isFinite(lo) && Number.isFinite(hi)
+        ? `${lo.toFixed(2)}…${hi.toFixed(2)}`
+        : '—';
+      return `<tr class="${joint.outside_limits ? 'outside' : ''}">` +
+        `<td>${escHtml(joint.name || `J${Number(joint.index) + 1}`)}</td>` +
+        `<td>${Number.isFinite(q) ? q.toFixed(3) : '—'}</td>` +
+        `<td>${limitText}</td>` +
+        `<td><span class="brake-badge ${joint.released ? 'released' : ''}">` +
+        `${joint.released ? 'RELEASED' : 'release OFF'}</span></td></tr>`;
+    }).join('');
+    return `<div class="doctor-arm-status">` +
+      `<div class="doctor-arm-status-title"><span>${escHtml(title)}</span>` +
+      `<span class="brake-summary ${armStatus.enabled ? 'released' : ''}">${summary}</span></div>` +
+      `<table class="brake-table"><thead><tr><th>Joint</th><th>q rad</th>` +
+      `<th>limits</th><th>status</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+
+  function renderBrakeStatus(data) {
+    doctorBrakeStatusKnown = true;
+    doctorBrakeReleaseActive = Boolean(data?.any_released);
+    const arms = data?.arms || {};
+    el('docBrakeStatus').innerHTML =
+      brakeStatusTable('Left arm', arms.left_arm) +
+      brakeStatusTable('Right arm', arms.right_arm);
+    if (doctorBrakeReleaseActive) {
+      const released = [];
+      for (const armStatus of Object.values(arms)) {
+        for (const joint of armStatus.joints || []) {
+          if (joint.released) released.push(joint.name);
+        }
+      }
+      el('docBrakeMessage').textContent =
+        `Release active: ${released.join(', ') || 'unknown joint'}. ` +
+        `All motion remains locked.`;
+      el('docBrakeMessage').className = 'doctor-brake-message warn';
+    } else {
+      el('docBrakeMessage').textContent =
+        'All 14 arm joints report brake release OFF.';
+      el('docBrakeMessage').className = 'doctor-brake-message ok';
+    }
+    setDoctorControls();
+  }
+
+  async function responseError(res) {
+    const text = await res.text();
+    try {
+      const parsed = JSON.parse(text);
+      return parsed.detail || text;
+    } catch {
+      return text;
+    }
+  }
+
+  async function runBrakeAction(action) {
+    // Once a release request is sent, assume it may have succeeded even if
+    // the HTTP response is lost. Only a subsequent status/engage response may
+    // clear this interlock.
+    if (action === 'release') doctorBrakeReleaseActive = true;
+    doctorBrakeBusy = true;
+    el('docBrakeMessage').textContent =
+      action === 'status' ? 'Reading all joint states…' : 'Operation running…';
+    el('docBrakeMessage').className = 'doctor-brake-message';
+    setDoctorControls();
+    try {
+      const body = { action };
+      if (action === 'release') {
+        const [arm, rawIndex] = el('docBrakeJointSelect').value.split(':');
+        body.arm = arm;
+        body.joint_index = Number(rawIndex);
+        body.confirmed = el('docBrakeConfirm').checked;
+      }
+      const res = await fetch(`${apiUrl}/doctor/arm_brakes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(`${res.status}: ${await responseError(res)}`);
+      const data = await res.json();
+      el('docBrakeConfirm').checked = false;
+      renderBrakeStatus(data);
+    } catch (e) {
+      doctorBrakeStatusKnown = false;
+      el('docBrakeMessage').textContent = e.message || String(e);
+      el('docBrakeMessage').className = 'doctor-brake-message err';
+    } finally {
+      doctorBrakeBusy = false;
+      setDoctorControls();
+    }
+  }
 
   async function runDoctorAction(spec) {
     const btn = el(spec.btn), status = el(spec.status);
-    DOCTOR_ACTIONS.forEach(a => { el(a.btn).disabled = true; });
+    doctorBrakeBusy = true;
+    setDoctorControls();
     status.textContent = 'running…'; status.className = 'doctor-action-status';
     try {
       const opts = { method: spec.method, headers: {} };
       if (spec.body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(spec.body); }
       const res = await fetch(apiUrl + spec.path, opts);
-      if (!res.ok) { const t = await res.text(); throw new Error(`${res.status}: ${t}`); }
+      if (!res.ok) throw new Error(`${res.status}: ${await responseError(res)}`);
       const data = await res.json().catch(() => ({}));
       if (data && data.failed && data.failed.length) {
         status.textContent = `partial (${data.failed.length} failed)`;
@@ -1071,30 +1460,75 @@
       status.textContent = (e.message || String(e)).slice(0, 80);
       status.className = 'doctor-action-status err';
     } finally {
-      DOCTOR_ACTIONS.forEach(a => { el(a.btn).disabled = false; });
+      doctorBrakeBusy = false;
+      setDoctorControls();
     }
   }
 
   async function openDoctor() {
-    // Stop teleop first and wait for confirmation, then reveal the modal.
+    // Doctor owns command-capable Robot clients, so do not reveal its actions
+    // until the asynchronous Teleop stop has actually completed.
     el('doctorBtn').disabled = true;
     try {
-      await api('/teleop/stop', 'POST');
+      const waitUntil = async (predicate, timeoutMs, message) => {
+        const deadline = Date.now() + timeoutMs;
+        while (!predicate()) {
+          if (Date.now() >= deadline) throw new Error(message);
+          await new Promise(resolve => setTimeout(resolve, 200));
+        }
+      };
+
+      if (S.teleopLifecycle === 'starting') {
+        await waitUntil(
+          () => S.teleopLifecycle !== 'starting',
+          90000,
+          'Teleop startup did not finish; Doctor remains locked',
+        );
+      }
+      if (['running', 'failed'].includes(S.teleopLifecycle)) {
+        await api('/teleop/stop', 'POST');
+      }
+      if (S.teleopLifecycle !== 'stopped') {
+        await waitUntil(
+          () => S.teleopLifecycle === 'stopped',
+          80000,
+          'Teleop did not stop safely; Doctor remains locked',
+        );
+      }
+    } catch (e) {
+      el('errorText').textContent = e.message || String(e);
+      el('errorBanner').style.display = '';
+      return;
     } finally {
       el('doctorBtn').disabled = false;
     }
     DOCTOR_ACTIONS.forEach(a => {
       const s = el(a.status);
       s.textContent = ''; s.className = 'doctor-action-status';
-      el(a.btn).disabled = false;
     });
+    doctorBrakeReleaseActive = false;
+    doctorBrakeStatusKnown = false;
+    doctorBrakeBusy = false;
+    el('docBrakeConfirm').checked = false;
+    el('docBrakeStatus').innerHTML = '';
+    el('docBrakeMessage').textContent = 'Reading all joint states…';
+    el('docBrakeMessage').className = 'doctor-brake-message';
     el('doctorOverlay').style.display = '';
+    setDoctorControls();
+    await runBrakeAction('status');
   }
 
-  const closeDoctor = () => { el('doctorOverlay').style.display = 'none'; };
+  const closeDoctor = () => {
+    if (doctorBrakeReleaseActive || doctorBrakeBusy) return;
+    el('doctorOverlay').style.display = 'none';
+  };
   el('doctorBtn').onclick     = openDoctor;
   el('doctorClose').onclick   = closeDoctor;
   el('doctorDismiss').onclick = closeDoctor;
+  el('docBrakeConfirm').onchange = setDoctorControls;
+  el('docBrakeReleaseBtn').onclick = () => runBrakeAction('release');
+  el('docBrakeEngageBtn').onclick = () => runBrakeAction('engage');
+  el('docBrakeRefreshBtn').onclick = () => runBrakeAction('status');
   DOCTOR_ACTIONS.forEach(spec => { el(spec.btn).onclick = () => runDoctorAction(spec); });
 
   // ── Control actions ───────────────────────────────────────────────────────

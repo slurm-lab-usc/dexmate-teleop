@@ -11,7 +11,6 @@ call super().initialize() to attach the shared subscribers).
 
 from __future__ import annotations
 
-import os
 import threading
 import time
 from pathlib import Path
@@ -24,6 +23,7 @@ from dexcomm.codecs import DictDataCodec
 from dexcomm.utils import RateLimiter
 
 from omniteleop.common import get_config
+from omniteleop.record.errors import RequiredSensorError
 
 # Optional deps — keyboard pedal mode and rerun visual indicator.
 try:
@@ -77,6 +77,10 @@ class BaseRecorder:
         self.image_resolution = tuple(resolution) if isinstance(resolution, list) else (640, 480)
         self.jpeg_quality = recorder_config.get("jpeg_quality", 90)
         self.auto_stop_on_estop = recorder_config.get("auto_stop_on_estop", True)
+        wrist_adapter_config = recorder_config.get("wrist_camera_adapter", {}) or {}
+        self.sensor_abort_after_s = float(
+            wrist_adapter_config.get("abort_after_s", 1.0)
+        )
 
         components_config = recorder_config.get("components", {})
         self.record_components: Dict[str, bool] = {
@@ -113,6 +117,8 @@ class BaseRecorder:
         self.record_thread: Optional[threading.Thread] = None
         self.record_running = False
         self.rate_limiter = RateLimiter(self.record_rate)
+        self._episode_finish_lock = threading.Lock()
+        self._auto_discard_pending = False
 
         # Pedal-mode state.
         self.pedal_key_press_times: Dict[str, float] = {}
@@ -244,6 +250,11 @@ class BaseRecorder:
             self.start_episode(data.get("metadata", {}))
         elif command == "stop" and self.is_recording:
             self.end_episode()
+        elif command == "toggle":
+            if self.is_recording:
+                self.end_episode()
+            else:
+                self.start_episode(data.get("metadata", {}))
         elif command == "discard" and self.is_recording:
             self.discard_episode()
 
@@ -255,6 +266,7 @@ class BaseRecorder:
             self.end_episode()
 
         self.is_recording = True
+        self._auto_discard_pending = False
         self.transitions_in_episode = 0
         self.episode_start_time = time.time()
         self.episode_start_timestamp_ns = time.time_ns()
@@ -287,6 +299,10 @@ class BaseRecorder:
         })
 
     def end_episode(self) -> None:
+        with self._episode_finish_lock:
+            self._end_episode_unlocked()
+
+    def _end_episode_unlocked(self) -> None:
         if not self.is_recording:
             logger.warning("Not currently recording")
             return
@@ -323,7 +339,11 @@ class BaseRecorder:
             "total_transitions": self.total_transitions,
         })
 
-    def discard_episode(self) -> None:
+    def discard_episode(self, reason: str = "") -> None:
+        with self._episode_finish_lock:
+            self._discard_episode_unlocked(reason)
+
+    def _discard_episode_unlocked(self, reason: str = "") -> None:
         if not self.is_recording:
             logger.warning("Not currently recording")
             return
@@ -339,6 +359,7 @@ class BaseRecorder:
         self._finalize_storage(success=False)
 
         self.episode_num += 1
+        reason_line = f"  ❌ Reason: {reason}\n" if reason else ""
 
         logger.opt(colors=True).info(
             "\n" + "=" * 80 + "\n"
@@ -347,7 +368,9 @@ class BaseRecorder:
             f"  📊 Transitions: {self.transitions_in_episode}\n"
             f"  ⏱️  Duration: {duration:.1f}s\n"
             f"  📈 Avg Rate: {avg_rate:.1f} Hz\n"
-            f"  ⚠️  Data was NOT saved\n" + "=" * 80
+            f"  ⚠️  Data was NOT saved\n"
+            + reason_line
+            + "=" * 80
         )
 
         self._show_rerun_indicator("discard", {
@@ -362,6 +385,7 @@ class BaseRecorder:
 
     def _record_loop(self) -> None:
         logger.info(f"Record loop started at {self.record_rate}Hz")
+        sensor_failure_started_at: Optional[float] = None
         while self.record_running and self.is_recording:
             try:
                 timestamp_ns = time.time_ns()
@@ -377,6 +401,27 @@ class BaseRecorder:
                 self._write_frame(timestamp_ns, resolved, observation, safety_flags)
                 self.transitions_in_episode += 1
                 self.total_transitions += 1
+                sensor_failure_started_at = None
+            except RequiredSensorError as e:
+                now = time.monotonic()
+                if sensor_failure_started_at is None:
+                    sensor_failure_started_at = now
+                    logger.error(f"Required recording sensor unhealthy: {e}")
+                elif now - sensor_failure_started_at >= self.sensor_abort_after_s:
+                    if not self._auto_discard_pending:
+                        self._auto_discard_pending = True
+                        reason = str(e)
+                        logger.error(
+                            f"Required sensor unhealthy for "
+                            f"{self.sensor_abort_after_s:.1f}s; discarding episode"
+                        )
+                        threading.Thread(
+                            target=self.discard_episode,
+                            args=(reason,),
+                            daemon=True,
+                            name=f"{self.__class__.__name__}AutoDiscard",
+                        ).start()
+                    return
             except Exception as e:
                 logger.error(f"Error in record loop: {e}")
             self.rate_limiter.sleep()

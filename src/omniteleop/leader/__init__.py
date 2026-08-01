@@ -1,8 +1,9 @@
-"""Leader modules for teleoperation input devices."""
+"""Leader modules for teleoperation input devices.
 
-from .arm_reader import LeaderArmReader as LeaderArmReader, main as leader_arm_main
-from .joycon_reader import JoyConReader as JoyConReader, main as joycon_main
-from .paddle_leader import PaddleLeader as PaddleLeader, main as paddle_main
+Keep imports lazy so optional hardware dependencies for one leader, such as
+``dynamixel_sdk`` for the exoskeleton arm reader, do not prevent unrelated
+leaders from starting.
+"""
 
 __all__ = [
     "LeaderArmReader",
@@ -12,3 +13,19 @@ __all__ = [
     "PaddleLeader",
     "paddle_main",
 ]
+
+
+def __getattr__(name: str):
+    if name in {"LeaderArmReader", "leader_arm_main"}:
+        from .arm_reader import LeaderArmReader, main
+
+        return LeaderArmReader if name == "LeaderArmReader" else main
+    if name in {"JoyConReader", "joycon_main"}:
+        from .joycon_reader import JoyConReader, main
+
+        return JoyConReader if name == "JoyConReader" else main
+    if name in {"PaddleLeader", "paddle_main"}:
+        from .paddle_leader import PaddleLeader, main
+
+        return PaddleLeader if name == "PaddleLeader" else main
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -27,7 +27,7 @@ def main() -> None:
     for all major components (left_arm, right_arm, head, chassis).
     """
     # Initialize robot with default configuration
-    robot = Robot()
+    robot = Robot(configure_default_state=False)
 
     # List of components that support error clearing
     components = ["left_arm", "right_arm", "head", "chassis", "left_hand", "right_hand"]

@@ -2,6 +2,7 @@
 """Robot controller with interpolation and hardware control."""
 
 import os
+import signal
 import sys
 import time
 import numpy as np
@@ -23,6 +24,9 @@ from omniteleop.common.ruckig_trajectory import (
     RuckigArmTrajectoryGenerator,
     RuckigTorsoTrajectoryGenerator,
 )
+from omniteleop.common.joint_state_safety import has_active_joint_error
+from omniteleop.common.tracking_watchdog import DelayedTrackingWatchdog
+from omniteleop.common.trajectory_safety import limit_sampled_joint_speed
 from loguru import logger
 import threading
 from dexbot_utils import RobotInfo
@@ -38,6 +42,24 @@ class RobotMode(Enum):
 class RobotController:
     """Robot controller with integrated motion interpolation and hardware control."""
 
+    ARM_DOF = 7
+    MODE_HOLD_SECONDS = 0.5
+    MODE_HOLD_DRIFT_TOL_RAD = 0.02
+    TRAJECTORY_TRACKING_TOL_RAD = 0.05
+    # Real-time Teleop commands intentionally use a much wider, sustained
+    # tracking threshold than planned homing. A moving arm normally trails the
+    # leader by a few hundredths of a radian; treating that servo lag as a hard
+    # fault makes normal Teleop stop. Gross failures (for example, a stuck
+    # joint) are still caught, while live joint errors and position limits are
+    # checked independently on every command.
+    REALTIME_TRACKING_TOL_RAD = 0.20
+    TRACKING_REFERENCE_DELAY_SECONDS = 0.25
+    TRACKING_VIOLATION_DURATION_SECONDS = 0.75
+    TRACKING_MINIMUM_PROGRESS_RAD = 0.01
+    FINAL_REACH_TIMEOUT_SECONDS = 2.0
+    HOMING_MAX_JOINT_SPEED_RAD_S = 0.35
+    WAYPOINT_CATCHUP_TIMEOUT_SECONDS = 2.0
+
     def __init__(
         self,
         namespace: str = "",
@@ -47,6 +69,7 @@ class RobotController:
         debug: bool = False,
         publish_telemetry: bool = True,
         config_name: Optional[str] = None,
+        no_arm_filter: bool = False,
     ) -> None:
         """Initialize robot controller.
 
@@ -58,6 +81,7 @@ class RobotController:
             debug: Enable debug output.
             publish_telemetry: Enable telemetry publishing for visualization.
             config_name: Name of the configuration file (without .yaml extension).
+            no_arm_filter: If True, skip Butterworth filtering for left_arm and right_arm.
 
         Note:
             Input rate, control rate, and input topic are loaded from config file.
@@ -83,6 +107,7 @@ class RobotController:
         self.interpolation_method = interpolation_method
         self.history_size = history_size
         self.use_velocity_control = use_velocity_control
+        self.no_arm_filter = no_arm_filter
 
         # Communication
         self.subscriber = None
@@ -110,6 +135,12 @@ class RobotController:
 
         # Current state - dict based per component
         self.current_state = {}  # {component: {'pos': [...], 'vel': [...]}}
+        self._arm_tracking_watchdog = DelayedTrackingWatchdog(
+            tolerance_rad=self.REALTIME_TRACKING_TOL_RAD,
+            reference_delay_s=self.TRACKING_REFERENCE_DELAY_SECONDS,
+            violation_duration_s=self.TRACKING_VIOLATION_DURATION_SECONDS,
+            minimum_progress_rad=self.TRACKING_MINIMUM_PROGRESS_RAD,
+        )
 
         # Components that need interpolation
         self.interpolated_components = {"left_arm", "right_arm"}
@@ -125,13 +156,21 @@ class RobotController:
         # Initialize multi-channel filter from config
         filter_config = self.config.get("filters", None)
 
+        # Disable arm filtering when no_arm_filter is set.
+        # Setting type="none" explicitly prevents fallback to the default
+        # butterworth filter, which would still filter arms at 10 Hz.
+        if self.no_arm_filter and filter_config is not None:
+            components = filter_config.setdefault("components", {})
+            for arm in ("left_arm", "right_arm"):
+                components[arm] = {"type": "none"}
+
         # Create the multi-channel filter
         self.filter = MultiChannelFilter(
             filter_config=filter_config, control_rate=self.control_rate
         )
 
         # Determine hand type from ROBOT_CONFIG env var
-        robot_config = os.environ.get("ROBOT_CONFIG", "vega_1_f5d6")
+        robot_config = os.environ.get("ROBOT_CONFIG", "vega_1u_gripper")
         if "gripper" in robot_config:
             self.hand_type = "gripper"
         elif "f5d6" in robot_config:
@@ -167,6 +206,10 @@ class RobotController:
         self._robot_mode = None
         self._is_first_command = True
         self.exit_requested = False
+        # Set by the SIGTERM/SIGINT handler so the shutdown path can tell an
+        # operator-requested exit from a supervisor-requested one.
+        self._termination_signal: Optional[int] = None
+        self._cleanup_done = False
 
         # Debug mode with efficient display
         self.debug = debug
@@ -183,6 +226,32 @@ class RobotController:
         logger.info(
             f"Robot controller: {self.input_rate}Hz input -> {self.control_rate}Hz control"
         )
+
+    def install_signal_handlers(self) -> None:
+        """Route SIGTERM/SIGINT into the normal exit path.
+
+        Python's default SIGTERM disposition kills the interpreter outright, so
+        neither ``finally`` blocks nor ``atexit`` hooks run. The app backend
+        stops teleop with ``killpg(SIGTERM)``, which means without this handler
+        the arms are abandoned in position mode with no publisher and fall
+        under gravity once the controller watchdog times out.
+        """
+
+        def _handle(signum, _frame):
+            if self._termination_signal is None:
+                self._termination_signal = signum
+                logger.warning(
+                    f"Received signal {signal.Signals(signum).name} — "
+                    f"exiting via the safe-park shutdown path"
+                )
+            self.exit_requested = True
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                signal.signal(sig, _handle)
+            except (ValueError, OSError) as exc:
+                # Not the main thread, or the platform disallows it.
+                logger.warning(f"Could not install {sig!r} handler: {exc}")
 
     def initialize(self) -> None:
         """Initialize communication and robot hardware.
@@ -219,12 +288,20 @@ class RobotController:
                 f"Publishing telemetry to {self.node.resolve_topic(telemetry_topic)}"
             )
 
-        # Initialize Dexcontrol robot
+        # Keep this process's handlers installed. Robot's default handlers call
+        # sys.exit() and would overwrite the exit-request path below.
         logger.info("Initializing robot hardware...")
-        self.robot = Robot()
+        self.robot = Robot(
+            auto_shutdown=False,
+            configure_default_state=False,
+        )
 
         # Parse home positions from config (no hardware movement)
         self._parse_home_positions()
+
+        if self.exit_requested:
+            logger.warning("Exit requested during initialization — skipping homing")
+            return
 
         if self.interpolation_method == "ruckig":
             self._init_ruckig_generators()
@@ -235,6 +312,115 @@ class RobotController:
         self._robot_mode = RobotMode.RUNNING
 
         logger.success("Robot controller initialized")
+
+    def _ensure_arms_in_position_mode(self) -> None:
+        """Re-arm both arms for position control before any homing motion.
+
+        ``Robot._set_default_state()`` sets position mode during ``Robot()``,
+        but it returns early when the software E-Stop is active — and a previous
+        session's park leaves the arms in ``disable`` mode. Without this, homing
+        would publish position commands that the arms ignore. Must be called
+        after ``estop.deactivate()``.
+        """
+        failures = []
+        for arm_name in ("left_arm", "right_arm"):
+            arm = getattr(self.robot, arm_name, None)
+            if arm is None:
+                continue
+            try:
+                brake_status = arm.get_brake_status()
+                if (
+                    not isinstance(brake_status, dict)
+                    or brake_status.get("success") is not True
+                ):
+                    raise RuntimeError(
+                        f"brake status query failed: {brake_status}"
+                    )
+                if bool(brake_status.get("enabled", False)):
+                    raise RuntimeError(
+                        "brake release is active for joints "
+                        f"{brake_status.get('joints', [])}"
+                    )
+                response = arm.set_modes(["position"] * self.ARM_DOF)
+                if not isinstance(response, dict) or response.get("success") is not True:
+                    raise RuntimeError(f"mode service rejected request: {response}")
+            except Exception as exc:  # pylint: disable=broad-except
+                failures.append(f"{arm_name}: {exc}")
+        if failures:
+            raise RuntimeError(
+                "Cannot enter position control; homing aborted (" + "; ".join(failures) + ")"
+            )
+        self._validate_live_arm_safety()
+        self._establish_current_pose_hold()
+        self._arm_tracking_watchdog.reset()
+
+    def _validate_live_arm_safety(self) -> None:
+        """Reject stale errors, non-finite positions, and URDF-limit violations."""
+        violations = []
+        for arm_name in ("left_arm", "right_arm"):
+            arm = getattr(self.robot, arm_name, None)
+            if arm is None:
+                continue
+            state = arm._get_state()  # noqa: SLF001 - public getters omit errors
+            errors = state.get("error")
+            if has_active_joint_error(errors):
+                violations.append(f"{arm_name} reports errors: {errors}")
+            position = np.asarray(state.get("pos", []), dtype=float)
+            if position.shape != (self.ARM_DOF,) or not bool(np.isfinite(position).all()):
+                violations.append(f"{arm_name} position state is invalid")
+                continue
+            limits = arm.joint_pos_limit
+            if limits is None or limits.shape != (self.ARM_DOF, 2):
+                violations.append(f"{arm_name} joint limits are unavailable")
+                continue
+            outside = np.flatnonzero(
+                (position < limits[:, 0] - 1e-3)
+                | (position > limits[:, 1] + 1e-3)
+            )
+            for index in outside:
+                violations.append(
+                    f"{arm_name}[{int(index)}]={position[index]:.6f} outside "
+                    f"[{limits[index, 0]:.6f}, {limits[index, 1]:.6f}]"
+                )
+        if violations:
+            raise RuntimeError("Unsafe live arm state: " + "; ".join(violations))
+
+    def _establish_current_pose_hold(self) -> None:
+        """Prove both arms accept position commands before any planned motion."""
+        arms = {
+            name: getattr(self.robot, name)
+            for name in ("left_arm", "right_arm")
+            if getattr(self.robot, name, None) is not None
+        }
+        targets = {
+            name: np.asarray(arm.get_joint_pos(), dtype=float).copy()
+            for name, arm in arms.items()
+        }
+        rate = RateLimiter(self.control_rate)
+        deadline = time.monotonic() + self.MODE_HOLD_SECONDS
+        while time.monotonic() < deadline:
+            for name, arm in arms.items():
+                arm.set_joint_pos(targets[name], wait_time=0.0)
+            rate.sleep()
+        self._validate_live_arm_safety()
+        drift = {
+            name: float(
+                np.max(
+                    np.abs(
+                        np.asarray(arm.get_joint_pos(), dtype=float)
+                        - targets[name]
+                    )
+                )
+            )
+            for name, arm in arms.items()
+        }
+        failed = {
+            name: value
+            for name, value in drift.items()
+            if value > self.MODE_HOLD_DRIFT_TOL_RAD
+        }
+        if failed:
+            raise RuntimeError(f"Arm hold verification failed: {failed}")
 
     def _init_ruckig_generators(self) -> None:
         """Initialize per-component ruckig trajectory generators from home positions."""
@@ -282,11 +468,17 @@ class RobotController:
         logger.info("Moving to home position with ruckig...")
         self.robot.estop.deactivate()
         time.sleep(2.0)
+        self._ensure_arms_in_position_mode()
 
         # Track per-component completion
         finished = {comp: False for comp in self.ruckig_generators}
+        self._arm_tracking_watchdog.reset()
 
+        final_arm_targets: dict[str, np.ndarray] = {}
         while not all(finished.values()):
+            if self.exit_requested:
+                logger.warning("Exit requested mid-homing — stopping ruckig homing")
+                return
             for component, gen in self.ruckig_generators.items():
                 if finished[component]:
                     continue
@@ -299,11 +491,16 @@ class RobotController:
                     self.robot.torso.set_joint_pos(cmd_pos, wait_time=0.0)
                 elif component in {"left_arm", "right_arm"}:
                     getattr(self.robot, component).set_joint_pos(cmd_pos, wait_time=0.0)
+                    final_arm_targets[component] = cmd_pos
 
                 if result != ruckig.Result.Working:
                     finished[component] = True
 
+            self._validate_live_arm_safety()
+            self._require_tracking(final_arm_targets)
             rate_limiter.sleep()
+
+        self._wait_for_final_arm_targets(final_arm_targets)
 
         # Open hands only if robot has hands
         if self.hand_type is not None:
@@ -405,6 +602,7 @@ class RobotController:
         """
         self.robot.estop.deactivate()
         time.sleep(0.1)
+        self._ensure_arms_in_position_mode()
 
         self._move_torso_to_home_direct()
         self._plan_and_execute_arms_to_home()
@@ -507,6 +705,19 @@ class RobotController:
         if qs_sample is None or len(qs_sample) == 0:
             raise RuntimeError("OMPL planning returned an empty trajectory")
 
+        qs_sample, scaling = limit_sampled_joint_speed(
+            qs_sample,
+            control_frequency=self.control_rate,
+            max_joint_speed_rad_s=self.HOMING_MAX_JOINT_SPEED_RAD_S,
+        )
+        logger.info(
+            "Safety time-scaling home trajectory: "
+            f"{scaling.original_waypoints} -> {scaling.scaled_waypoints} waypoints, "
+            f"planned peak={scaling.original_peak_speed_rad_s:.3f} rad/s, "
+            f"limit={self.HOMING_MAX_JOINT_SPEED_RAD_S:.3f} rad/s, "
+            f"scale={scaling.scale_factor:.2f}x"
+        )
+
         self._execute_arm_trajectory(qs_sample, planner_joint_names)
         logger.info("Robot moved to home position via OMPL planner")
 
@@ -551,17 +762,162 @@ class RobotController:
         right_names = self.robot.right_arm.joint_name
         has_left = "left_arm" in self.home_positions
         has_right = "right_arm" in self.home_positions
+        final_targets: dict[str, np.ndarray] = {}
         for qpos_array in qs_sample:
+            if self.exit_requested:
+                logger.warning(
+                    "Exit requested mid-trajectory — stopping planned home motion"
+                )
+                return
             waypoint = dict(zip(planner_joint_names, qpos_array))
             if has_left:
-                self.robot.left_arm.set_joint_pos(
-                    np.array([waypoint[j] for j in left_names]), wait_time=0.0
-                )
+                left_target = np.array([waypoint[j] for j in left_names])
+                final_targets["left_arm"] = left_target
             if has_right:
-                self.robot.right_arm.set_joint_pos(
-                    np.array([waypoint[j] for j in right_names]), wait_time=0.0
+                right_target = np.array([waypoint[j] for j in right_names])
+                final_targets["right_arm"] = right_target
+            self._follow_planned_waypoint(final_targets, rate_limiter)
+        self._wait_for_final_arm_targets(final_targets)
+
+    def _follow_planned_waypoint(
+        self,
+        targets: Dict[str, np.ndarray],
+        rate_limiter: RateLimiter,
+    ) -> None:
+        """Pause the collision-planned path while an arm catches up."""
+        catchup_started: float | None = None
+        while True:
+            if self.exit_requested:
+                return
+            for name, target in targets.items():
+                getattr(self.robot, name).set_joint_pos(target, wait_time=0.0)
+            self._validate_live_arm_safety()
+
+            actuals: dict[str, np.ndarray] = {}
+            for name, target in targets.items():
+                actual = np.asarray(
+                    getattr(self.robot, name).get_joint_pos(),
+                    dtype=float,
+                )
+                if actual.shape != target.shape or not bool(np.isfinite(actual).all()):
+                    raise RuntimeError(f"{name} returned invalid position state")
+                actuals[name] = actual
+            errors = {
+                name: float(np.max(np.abs(actuals[name] - target)))
+                for name, target in targets.items()
+            }
+            if all(
+                error <= self.TRAJECTORY_TRACKING_TOL_RAD
+                for error in errors.values()
+            ):
+                rate_limiter.sleep()
+                return
+
+            now = time.monotonic()
+            if catchup_started is None:
+                catchup_started = now
+            elif now - catchup_started >= self.WAYPOINT_CATCHUP_TIMEOUT_SECONDS:
+                raise RuntimeError(
+                    "Arm waypoint catch-up timed out: "
+                    + self._format_position_target_errors(targets, actuals)
                 )
             rate_limiter.sleep()
+
+    def _format_position_target_errors(
+        self,
+        targets: Dict[str, np.ndarray],
+        actuals: Dict[str, np.ndarray],
+    ) -> str:
+        formatted: dict[str, object] = {}
+        for name, target in targets.items():
+            differences = np.abs(actuals[name] - target)
+            joint_index = int(np.argmax(differences))
+            arm = getattr(self.robot, name)
+            formatted[name] = {
+                "joint": arm.joint_name[joint_index],
+                "error_rad": round(float(differences[joint_index]), 6),
+                "actual_rad": round(float(actuals[name][joint_index]), 6),
+                "target_rad": round(float(target[joint_index]), 6),
+            }
+        return str(formatted)
+
+    def _require_tracking(self, targets: Dict[str, np.ndarray]) -> None:
+        actuals = {
+            name: np.asarray(
+                getattr(self.robot, name).get_joint_pos(),
+                dtype=float,
+            )
+            for name in targets
+        }
+        watchdog = getattr(self, "_arm_tracking_watchdog", None)
+        if watchdog is None:
+            watchdog = DelayedTrackingWatchdog(
+                tolerance_rad=self.REALTIME_TRACKING_TOL_RAD,
+                reference_delay_s=self.TRACKING_REFERENCE_DELAY_SECONDS,
+                violation_duration_s=self.TRACKING_VIOLATION_DURATION_SECONDS,
+                minimum_progress_rad=self.TRACKING_MINIMUM_PROGRESS_RAD,
+            )
+            self._arm_tracking_watchdog = watchdog
+        errors = watchdog.update(targets, actuals)
+        if errors:
+            raise RuntimeError(
+                "Arm trajectory tracking failed: "
+                + self._format_tracking_failures(watchdog, errors)
+            )
+
+    def _format_tracking_failures(
+        self,
+        watchdog: DelayedTrackingWatchdog,
+        errors: Dict[str, float],
+    ) -> str:
+        """Format arm tracking errors with the responsible physical joint."""
+        details = getattr(watchdog, "last_failure_details", {})
+        formatted: dict[str, object] = {}
+        for arm_name, error in errors.items():
+            detail = details.get(arm_name)
+            arm = getattr(self.robot, arm_name, None)
+            joint_names = getattr(arm, "joint_name", ())
+            if detail is None or detail.joint_index >= len(joint_names):
+                formatted[arm_name] = error
+                continue
+            formatted[arm_name] = {
+                "joint": joint_names[detail.joint_index],
+                "error_rad": round(detail.error_rad, 6),
+                "actual_rad": round(detail.actual_rad, 6),
+                "reference_rad": round(detail.reference_rad, 6),
+            }
+        return str(formatted)
+
+    def _wait_for_final_arm_targets(
+        self, targets: Dict[str, np.ndarray]
+    ) -> None:
+        rate = RateLimiter(self.control_rate)
+        deadline = time.monotonic() + self.FINAL_REACH_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            for name, target in targets.items():
+                getattr(self.robot, name).set_joint_pos(target, wait_time=0.0)
+            self._validate_live_arm_safety()
+            errors = {
+                name: float(
+                    np.max(
+                        np.abs(
+                            np.asarray(
+                                getattr(self.robot, name).get_joint_pos(),
+                                dtype=float,
+                            )
+                            - target
+                        )
+                    )
+                )
+                for name, target in targets.items()
+            }
+            if all(
+                error <= self.TRAJECTORY_TRACKING_TOL_RAD
+                for error in errors.values()
+            ):
+                return
+            rate.sleep()
+        raise RuntimeError(f"Arms failed to reach final target: {errors}")
 
     def _on_safe_command(self, data: Dict) -> None:
         """Handle incoming safe command.
@@ -623,6 +979,7 @@ class RobotController:
             # Emergency stop released
             logger.info("Emergency stop released")
             self.robot.estop.deactivate()
+            self._ensure_arms_in_position_mode()
             self.robot.head.set_mode("enable")
             self.robot.head.set_joint_pos(
                 self.home_positions["head"], wait_time=2.0, exit_on_reach=True
@@ -747,12 +1104,25 @@ class RobotController:
             if "head" in components:
                 self._send_head_command(components["head"])
 
-            # Process arm commands
-            if "left_arm" in components:
-                self._send_arm_command("left_arm", components["left_arm"])
-
-            if "right_arm" in components:
-                self._send_arm_command("right_arm", components["right_arm"])
+            # Match the original real-time Teleop behavior: validated leader
+            # targets are sent directly. Clamping every target around measured
+            # feedback creates an implicit speed limit and makes the follower
+            # feel sluggish. CommandProcessor still enforces collision and
+            # joint limits; hardware state and gross sustained tracking faults
+            # remain checked below.
+            arm_targets: dict[str, np.ndarray] = {}
+            for name in ("left_arm", "right_arm"):
+                if name not in components or "pos" not in components[name]:
+                    continue
+                target = self._validate_realtime_arm_target(
+                    name,
+                    np.asarray(components[name]["pos"], dtype=float),
+                )
+                self._send_arm_command(name, components[name])
+                arm_targets[name] = target
+            if arm_targets:
+                self._validate_live_arm_safety()
+                self._require_tracking(arm_targets)
 
             if "left_hand" in components:
                 self._send_hand_command("left_hand", components["left_hand"])
@@ -761,6 +1131,18 @@ class RobotController:
 
         except Exception as e:
             logger.error(f"Failed to send robot command: {e}")
+            self._robot_mode = RobotMode.STOP
+            raise
+
+    def _validate_realtime_arm_target(
+        self,
+        arm_name: str,
+        desired: np.ndarray,
+    ) -> np.ndarray:
+        """Validate a Teleop target without changing its motion profile."""
+        if desired.shape != (self.ARM_DOF,) or not bool(np.isfinite(desired).all()):
+            raise RuntimeError(f"{arm_name} received an invalid real-time target")
+        return desired
 
     def _publish_telemetry(self, command: Dict):
         """Publish telemetry data for visualization.
@@ -840,6 +1222,7 @@ class RobotController:
             arm_commands["right_arm"] = components["right_arm"]["pos"]
         if arm_commands:
             self.robot.set_joint_pos(arm_commands, wait_time=5.0, exit_on_reach=True)
+            self._arm_tracking_watchdog.reset()
 
     def _send_base_command(self, base_data: Dict):
         """Send command to mobile base.
@@ -945,6 +1328,12 @@ class RobotController:
         and publishes telemetry. Exits when exit signal is received.
         """
         logger.info(f"Starting robot control at {self.control_rate}Hz")
+        logger.info(
+            "Real-time arm control: direct targets, no application lead/speed "
+            f"clamp; tracking stop threshold={self.REALTIME_TRACKING_TOL_RAD:.2f} "
+            f"rad with <{self.TRACKING_MINIMUM_PROGRESS_RAD:.2f} rad progress "
+            f"for {self.TRACKING_VIOLATION_DURATION_SECONDS:.2f}s"
+        )
 
         # Start the joint feedback publishing thread
         self.joint_publish_running = True
@@ -990,9 +1379,33 @@ class RobotController:
     def cleanup(self) -> None:
         """Clean up resources.
 
-        Stops joint feedback publishing, debug display, and robot hardware.
-        Shuts down all communication channels.
+        Latches the measured pose in position mode, stops joint feedback and
+        the debug display, then shuts down robot hardware and communication.
+
+        Idempotent: safe to call from both the normal path and a ``finally``.
         """
+        if self._cleanup_done:
+            return
+        self._cleanup_done = True
+
+        # Stop accepting new trajectories before touching the hardware.
+        self.exit_requested = True
+        if self.subscriber is not None:
+            try:
+                self.subscriber.shutdown()
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.debug(f"Command subscriber shutdown: {exc}")
+            self.subscriber = None
+
+        # Hardware tests showed that set_modes(disable) makes both arms fall.
+        # Restore the original position-mode shutdown behavior: briefly latch
+        # the measured pose, then disconnect without forcing disable/E-Stop.
+        if self.robot:
+            try:
+                self._establish_current_pose_hold()
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.warning(f"Final position hold before shutdown failed: {exc}")
+
         # Stop the joint feedback publishing thread
         if self.joint_publish_thread:
             self.joint_publish_running = False
@@ -1021,6 +1434,7 @@ def main(
     debug: bool = False,
     publish_telemetry: bool = False,
     config_name: Optional[str] = None,
+    no_arm_filter: bool = False,
 ):
     """Main entry point for robot controller.
 
@@ -1034,6 +1448,7 @@ def main(
         debug: Enable debug output.
         publish_telemetry: Enable telemetry publishing for visualization.
         config_name: Config file name (without .yaml). Uses ROBOT_CONFIG env var if None.
+        no_arm_filter: If True, skip Butterworth filtering for left_arm and right_arm.
     """
     # Setup logging
     logger = setup_logging(debug)
@@ -1048,14 +1463,29 @@ def main(
         debug=debug,
         publish_telemetry=publish_telemetry,
         config_name=config_name,
+        no_arm_filter=no_arm_filter,
     )
 
-    controller.initialize()
+    # Installed before any hardware exists so a stop during Robot() init or
+    # homing still unwinds through cleanup() instead of killing the process.
+    controller.install_signal_handlers()
 
-    controller.run()
-    controller.cleanup()
+    exit_code = 0
+    try:
+        controller.initialize()
+        controller.run()
+    except KeyboardInterrupt:
+        logger.warning("Interrupted — parking arms before exit")
+        exit_code = 130
+    except Exception:  # noqa: BLE001 - top-level hardware owner must unwind cleanly
+        logger.exception("Robot controller failed")
+        exit_code = 1
+    finally:
+        # The arms are in position mode from Robot() onward, so every exit path
+        # (clean, exception, SIGINT, SIGTERM) must reach the park sequence.
+        controller.cleanup()
 
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

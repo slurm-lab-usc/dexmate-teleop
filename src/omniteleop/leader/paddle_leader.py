@@ -242,6 +242,12 @@ class PaddleLeader:
         self._joints_sub = None
         self._last_sync_time: float = 0.0
 
+        # Diagnostics state (publish Hz, tracking transitions, etc.).
+        self._pub_counter: int = 0
+        self._last_diag_time: float = 0.0
+        self._last_diag_pub_count: int = 0
+        self._prev_side_tracking: dict[str, bool] = {"left": False, "right": False}
+
         logger.info(
             f"PaddleLeader constructed (vr_topic={self.vr_topic}, "
             f"cmd_topic={self.cmd_topic}, rate={resolved_rate})"
@@ -513,10 +519,12 @@ class PaddleLeader:
 
           1. Pull the intervention tuple (uses current MM state; on the
              first tracking frame this captures the reference pose via
-             FK from the MM).
+             FK from the MM).  IK solve time is captured here for
+             diagnostics.
           2. Update the software-estop gesture state from the VR
              thumbstick clicks.
-          3. Sync the MM from live joint feedback:
+          3. Log per-side tracking transitions (hold-on-release).
+          4. Sync the MM from live joint feedback:
              - Every tick when NOT tracking, so the MM is fresh when
                tracking starts next. This is the critical invariant.
                The reference-pose capture uses MM FK; a stale MM means
@@ -524,13 +532,14 @@ class PaddleLeader:
                jumps and post-release "momentum".
              - Every `sync_interval` during tracking to correct IK
                seed drift without per-frame round-trip latency.
-          4. Publish: while tracking, forward the intervention tuple
+          5. Publish: while tracking, forward the intervention tuple
              as-is (the solver returns held qpos for the inactive
              side, which is correct because the MM was fresh up until
              the moment tracking began). While not tracking, publish
              the latest joint feedback as a hold target — same as
              intervention_deployer's fake policy pattern, minus the
              oscillation.
+          6. Emit periodic diagnostics (~1 Hz).
         """
         now_ns = time.time_ns()
         now_mono = time.monotonic()
@@ -540,10 +549,32 @@ class PaddleLeader:
         # intervention_deployer.py use the same entry point; upstream
         # should promote it to a public name in a follow-up PR. If it
         # moves, update all three call sites.
+        #
+        # Time the IK solve for diagnostics.
+        _ik_start = time.perf_counter()
         intervention_result = (
             self.intervention_controller._get_intervention_qpos()  # noqa: SLF001
         )
+        ik_ms = (time.perf_counter() - _ik_start) * 1000
         tracking = intervention_result[0]
+
+        # Snapshot per-side tracking state after the IK solve (the tracker
+        # updates _tracking inside update() called by _get_intervention_qpos).
+        tracker = self.intervention_controller.tracker
+        current_side_tracking = {
+            s: tracker._tracking.get(s, False)  # noqa: SLF001
+            for s in ("left", "right")
+        }
+
+        # Log hold-on-release: detect when a side transitions tracking ->
+        # not-tracking and emit a diagnostic so the operator knows the system
+        # will publish the last-known joint positions as hold targets.
+        for side in ("left", "right"):
+            if self._prev_side_tracking[side] and not current_side_tracking[side]:
+                logger.info(
+                    f"Tracking released for {side} arm, holding position"
+                )
+        self._prev_side_tracking = current_side_tracking
 
         # Read thumbstick click from the same VRSubscriber the tracker
         # uses. Reaches past one private access layer to avoid opening a
@@ -553,7 +584,6 @@ class PaddleLeader:
         # ControllerState (dexstream.subscribers.vr) nests the click
         # inside a Thumbstick dataclass — the flat `thumbstick_click`
         # key only exists in the raw wire dict, not the typed view.
-        tracker = self.intervention_controller.tracker
         vr_sub = tracker._vr_sub  # noqa: SLF001
         self._update_estop_gesture(
             left_click=bool(vr_sub.left.thumbstick.click),
@@ -589,6 +619,44 @@ class PaddleLeader:
             torso_qpos=torso_qpos,
         )
         self.command_pub.publish(payload)
+        self._pub_counter += 1
+
+        # ------------------------------------------------------------------
+        # Periodic diagnostic logging (~1 Hz).
+        # ------------------------------------------------------------------
+        if now_mono - self._last_diag_time >= 1.0:
+            elapsed = now_mono - self._last_diag_time
+            pub_count_diff = self._pub_counter - self._last_diag_pub_count
+            publish_hz = pub_count_diff / elapsed if elapsed > 0 else 0.0
+
+            # VR sample age (milliseconds).
+            vr_ts = vr_sub.timestamp_ns
+            vr_age_ms = (time.time_ns() - vr_ts) / 1e6 if vr_ts > 0 else -1.0
+
+            # Latest joint-feedback age (milliseconds).
+            with self._data_lock:
+                jf = self._latest_joint_feedback
+            jf_age_ms = -1.0
+            if jf is not None:
+                jf_ts = jf.get("timestamp_ns", 0)
+                jf_age_ms = (
+                    (time.time_ns() - jf_ts) / 1e6 if jf_ts > 0 else -1.0
+                )
+
+            # Per-arm tracking indicator (1 = tracking, 0 = not tracking).
+            tracking_l = 1 if current_side_tracking.get("left", False) else 0
+            tracking_r = 1 if current_side_tracking.get("right", False) else 0
+
+            logger.info(
+                f"[DIAG] publish_hz={publish_hz:.1f} "
+                f"vr_age_ms={vr_age_ms:.1f} "
+                f"joint_age_ms={jf_age_ms:.1f} "
+                f"ik_ms={ik_ms:.1f} "
+                f"tracking=(L:{tracking_l},R:{tracking_r})"
+            )
+
+            self._last_diag_time = now_mono
+            self._last_diag_pub_count = self._pub_counter
 
     def run(self) -> None:
         """Main blocking loop. Returns on KeyboardInterrupt."""

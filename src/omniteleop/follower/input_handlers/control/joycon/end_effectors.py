@@ -7,6 +7,7 @@ types of end-effectors (5-finger hands, grippers, etc) from JoyCon input.
 
 from __future__ import annotations
 
+import time
 from typing import Dict, Any
 from dataclasses import dataclass
 
@@ -175,11 +176,14 @@ class HandF5D6Controller(AbstractEndEffectorController):
 class GripperController(AbstractEndEffectorController):
     """Controller for simple grippers.
 
-    JoyCon Mapping (similar to HandF5D6Controller):
-    - Open gripper: left button (left) / Y button (right)
-    - Close gripper: right button (left) / A button (right)
-    - Fine adjustment (toggle with L/R buttons):
-      - L/R + up/down (left) or X/B (right): Increment/decrement gripper position
+    JoyCon mapping:
+    - Left/right stick Y: proportional fine control for that side
+    - Full open: D-pad Up (left) / X (right)
+    - Full close: D-pad Down (left) / B (right)
+
+    Fine control is always available in hand mode. It is velocity-based
+    (``speed * dt``), requires the stick to be observed at neutral before
+    moving, and never uses L/R as a latched mode toggle.
     """
 
     def __init__(self, side: str, config: Dict[str, Any]):
@@ -191,8 +195,11 @@ class GripperController(AbstractEndEffectorController):
         """
         super().__init__(side, config)
 
-        # Control sensitivity for fine adjustment mode
-        self.sensitivity = config.get("sensitivity", 0.05)
+        self.fine_max_speed = float(config.get("fine_max_speed", 0.15))
+        self.stick_deadzone = float(config.get("fine_stick_deadzone", 0.15))
+        self.max_dt = float(config.get("fine_max_dt", 0.10))
+        self._last_update_time = time.monotonic()
+        self._neutral_required = True
 
         # Get poses from config (only open and close for gripper)
         self.predefined_poses = config.get("poses", {"close": [0.0], "open": [0.78]})
@@ -217,53 +224,45 @@ class GripperController(AbstractEndEffectorController):
         if joycon_input.zl_zr_pressed:
             return [], "absolute"  # Return empty when disabled
 
-        # Fine adjustment mode - RELATIVE control
-        if joycon_input.fine_adjustment_active:
-            joint_deltas = np.zeros(self.dof)
+        now = time.monotonic()
+        dt = min(max(now - self._last_update_time, 0.0), self.max_dt)
+        self._last_update_time = now
 
-            # Calculate gripper delta from buttons
-            gripper_delta = 0.0
-            if self.side == "left":
-                if joycon_input.buttons.get("up", False):
-                    gripper_delta = self.sensitivity  # Open increment
-                elif joycon_input.buttons.get("down", False):
-                    gripper_delta = -self.sensitivity  # Close increment
-            else:
-                if joycon_input.buttons.get("x", False):
-                    gripper_delta = self.sensitivity  # Open increment
-                elif joycon_input.buttons.get("b", False):
-                    gripper_delta = -self.sensitivity  # Close increment
-
-            if gripper_delta != 0.0:
-                joint_deltas[:] = gripper_delta
-
-            return (
-                (joint_deltas.tolist(), "relative")
-                if joint_deltas.size > 0
-                else ([], "relative")
-            )
-
+        # Deliberate full-travel commands take priority over analog fine
+        # control. The directional pairing is the same on both JoyCons:
+        # upper button opens, lower button closes.
+        if self.side == "left":
+            if joycon_input.buttons.get("up", False):
+                return self.get_predefined_poses("open"), "absolute"
+            if joycon_input.buttons.get("down", False):
+                return self.get_predefined_poses("close"), "absolute"
         else:
-            joint_positions = []
-            # Non-modifier button controls (absolute poses)
-            if self.side == "left":
-                # Open gripper
-                if joycon_input.buttons.get("left", False):
-                    joint_positions = self.get_predefined_poses("open")
-                # Close gripper
-                elif joycon_input.buttons.get("right", False):
-                    joint_positions = self.get_predefined_poses("close")
+            if joycon_input.buttons.get("x", False):
+                return self.get_predefined_poses("open"), "absolute"
+            if joycon_input.buttons.get("b", False):
+                return self.get_predefined_poses("close"), "absolute"
 
-            else:  # right controller
-                # Open gripper
-                if joycon_input.buttons.get("y", False):
-                    joint_positions = self.get_predefined_poses("open")
-                # Close gripper
-                elif joycon_input.buttons.get("a", False):
-                    joint_positions = self.get_predefined_poses("close")
+        stick_y = float(joycon_input.stick_y)
+        magnitude = abs(stick_y)
+        if magnitude <= self.stick_deadzone:
+            self._neutral_required = False
+            return [], "relative"
 
-        # Return absolute positions for predefined poses
-        return (joint_positions, "absolute")
+        if self._neutral_required or dt <= 0.0:
+            return [], "relative"
+
+        # Remove the deadzone and remap the remaining travel to [0, 1].
+        normalized = (magnitude - self.stick_deadzone) / (
+            1.0 - self.stick_deadzone
+        )
+        direction = 1.0 if stick_y > 0 else -1.0
+        delta = direction * normalized * self.fine_max_speed * dt
+        return [float(delta)] * self.dof, "relative"
+
+    def require_neutral(self) -> None:
+        """Block analog motion until this side's stick returns to neutral."""
+        self._neutral_required = True
+        self._last_update_time = time.monotonic()
 
     def get_predefined_poses(self, pose_name: str) -> list:
         """Get predefined pose by name."""

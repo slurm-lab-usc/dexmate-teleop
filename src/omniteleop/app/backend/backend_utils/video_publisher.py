@@ -1,103 +1,119 @@
-"""Video publisher module - handles video streaming via WebSocket."""
+"""Latest-frame WebSocket video fan-out without blocking the event loop."""
+
+from __future__ import annotations
 
 import asyncio
-from fastapi import WebSocket, WebSocketDisconnect
+from collections import defaultdict
 from typing import Callable
+
+from fastapi import WebSocket, WebSocketDisconnect
 
 
 class VideoPublisher:
-    """Handles video streaming for cameras."""
+    """Encode each camera once per frame and fan it out to current viewers."""
 
-    def __init__(self):
-        """Initialize video publisher."""
-        self.active_streams = {}  # camera_id -> WebSocket
-        self._get_frame_callback = None  # Callback to get camera frames
+    def __init__(self) -> None:
+        self.active_streams: dict[str, set[WebSocket]] = defaultdict(set)
+        self._producer_tasks: dict[str, asyncio.Task] = {}
+        self._get_frame_callback: Callable[[str], bytes] | None = None
+        self.send_timeout = 0.2
 
-    def set_frame_callback(self, callback: Callable[[str], bytes]):
-        """Set callback function to get camera frames.
-
-        Args:
-            callback: Function that takes camera_id and returns frame bytes
-        """
+    def set_frame_callback(self, callback: Callable[[str], bytes]) -> None:
         self._get_frame_callback = callback
 
-    async def start_stream(self, websocket: WebSocket, camera_id: str):
-        """Start streaming video for a camera."""
+    @staticmethod
+    def _fps(camera_id: str) -> float:
+        return 10.0 if camera_id in {"left_wrist", "right_wrist"} else 30.0
+
+    async def start_stream(self, websocket: WebSocket, camera_id: str) -> None:
         if not self._get_frame_callback:
-            await websocket.close(code=500, reason="Frame callback not set")
+            await websocket.close(code=1011, reason="Frame callback not set")
             return
 
         await websocket.accept()
-        self.active_streams[camera_id] = websocket
-
-        interval = 1.0 / 30.0  # ~30 FPS
+        self.active_streams[camera_id].add(websocket)
+        task = self._producer_tasks.get(camera_id)
+        if task is None or task.done():
+            self._producer_tasks[camera_id] = asyncio.create_task(
+                self._produce(camera_id)
+            )
 
         try:
-            while camera_id in self.active_streams:
-                # Get frame from callback (this should not raise send errors)
-                try:
-                    frame = self._get_frame_callback(camera_id)
-                except Exception as e:
-                    # Error getting frame from callback
-                    error_msg = str(e).lower()
-                    # If it's a send/close error, the websocket is likely closed
-                    if "send" in error_msg or "close" in error_msg:
-                        break
-                    # Otherwise, just log and continue
-                    print(f"Error getting frame for {camera_id}: {e}")
-                    await asyncio.sleep(interval)
-                    continue
-
-                # Try to send frame
-                if frame:
-                    try:
-                        await websocket.send_bytes(frame)
-                    except (
-                        WebSocketDisconnect,
-                        RuntimeError,
-                        ConnectionError,
-                        OSError,
-                    ) as e:
-                        # WebSocket was closed or connection lost, break out of loop
-                        error_msg = str(e).lower()
-                        # Don't print error for normal disconnects
-                        if "close message" not in error_msg:
-                            print(f"WebSocket send error for {camera_id}: {e}")
-                        break
-
-                await asyncio.sleep(interval)
-        except WebSocketDisconnect:
-            # Normal disconnect, no error needed
+            while websocket in self.active_streams.get(camera_id, set()):
+                await websocket.receive()
+        except (WebSocketDisconnect, RuntimeError, ConnectionError, OSError):
             pass
-        except (RuntimeError, ConnectionError, OSError) as e:
-            # WebSocket connection errors - only log if not about closing
-            error_msg = str(e).lower()
-            if "close message" not in error_msg:
-                print(f"Video stream connection error for {camera_id}: {e}")
-        except Exception as e:
-            # Other errors
-            error_msg = str(e).lower()
-            if "close message" not in error_msg:
-                print(f"Video stream error for {camera_id}: {e}")
         finally:
-            # Always remove from active streams
+            self._remove(camera_id, websocket)
+
+    async def _produce(self, camera_id: str) -> None:
+        interval = 1.0 / self._fps(camera_id)
+        try:
+            while self.active_streams.get(camera_id):
+                started = asyncio.get_running_loop().time()
+                await self.publish_frame(camera_id)
+
+                elapsed = asyncio.get_running_loop().time() - started
+                await asyncio.sleep(max(0.0, interval - elapsed))
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._producer_tasks.pop(camera_id, None)
+
+    async def publish_frame(self, camera_id: str) -> None:
+        """Fetch/encode one frame once, then fan it out to all viewers."""
+        callback = self._get_frame_callback
+        frame = (
+            await asyncio.to_thread(callback, camera_id)
+            if callback is not None
+            else b""
+        )
+        if not frame:
+            return
+
+        disconnected: set[WebSocket] = set()
+
+        async def send(ws: WebSocket) -> None:
+            try:
+                await asyncio.wait_for(
+                    ws.send_bytes(frame),
+                    timeout=self.send_timeout,
+                )
+            except Exception:
+                disconnected.add(ws)
+
+        await asyncio.gather(
+            *(
+                send(ws)
+                for ws in tuple(self.active_streams.get(camera_id, set()))
+            ),
+            return_exceptions=True,
+        )
+        for ws in disconnected:
+            self._remove(camera_id, ws)
+
+    def _remove(self, camera_id: str, websocket: WebSocket) -> None:
+        streams = self.active_streams.get(camera_id)
+        if streams is None:
+            return
+        streams.discard(websocket)
+        if not streams:
             self.active_streams.pop(camera_id, None)
 
-    async def stop_stream(self, camera_id: str):
-        """Stop streaming for a camera."""
-        if camera_id in self.active_streams:
-            ws = self.active_streams[camera_id]
+    async def stop_stream(self, camera_id: str) -> None:
+        streams = tuple(self.active_streams.pop(camera_id, set()))
+        for ws in streams:
             try:
                 await ws.close()
-            except:
+            except Exception:
                 pass
-            self.active_streams.pop(camera_id, None)
+        task = self._producer_tasks.pop(camera_id, None)
+        if task is not None:
+            task.cancel()
 
-    async def stop_all_streams(self):
-        """Stop all active streams."""
-        for camera_id in list(self.active_streams.keys()):
+    async def stop_all_streams(self) -> None:
+        for camera_id in tuple(self.active_streams):
             await self.stop_stream(camera_id)
 
 
-# Global video publisher instance
 video_publisher = VideoPublisher()

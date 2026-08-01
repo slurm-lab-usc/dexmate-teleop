@@ -66,7 +66,7 @@ class VRController(AbstractController):
         # Determine hand type from ROBOT_CONFIG env var (same as JoyCon controller)
         import os
 
-        robot_config = os.environ.get("ROBOT_CONFIG", "vega_1_f5d6")
+        robot_config = os.environ.get("ROBOT_CONFIG", "vega_1u_gripper")
         if "gripper" in robot_config:
             hand_type = "gripper"
         elif "f5d6" in robot_config:

@@ -33,7 +33,8 @@ class JoyConController(AbstractController):
     - Base control: +/- buttons (single) toggle activation (highest priority)
     - Head control: +/- buttons (simultaneous) toggle manual head control
     - Torso control: ZL/ZR buttons toggle activation (medium priority)
-    - Fine adjustment: L/R buttons toggle activation (lowest priority)
+    - Gripper fine control: always available on the two stick Y axes
+    - Recording: L+R hold, committed after both buttons are released
 
     Priority order: exit > estop > base > head > torso > hands
     """
@@ -58,13 +59,10 @@ class JoyConController(AbstractController):
         self.base_active = False
         self.head_active = False
         self.torso_active = False
-        self.fine_adjustment_active = False
         self.estop_active = True  # Start with estop active for safety
         self.exit_requested = False
-        self.recording_active = False  # Track recording state
-        self._last_recording_state = (
-            False  # Track previous recording state for change detection
-        )
+        self._recording_release_armed = False
+        self._recording_toggle_requested = False
 
         # Statistics
         self.stats = {
@@ -107,6 +105,14 @@ class JoyConController(AbstractController):
         right_config["type"] = hand_type
         left_config["sensitivity"] = hands_config.get("sensitivity", 0.05)
         right_config["sensitivity"] = hands_config.get("sensitivity", 0.05)
+        for side_config in (left_config, right_config):
+            side_config["fine_max_speed"] = hands_config.get(
+                "fine_max_speed", 0.15
+            )
+            side_config["fine_stick_deadzone"] = hands_config.get(
+                "fine_stick_deadzone", 0.15
+            )
+            side_config["fine_max_dt"] = hands_config.get("fine_max_dt", 0.10)
 
         # Get deadzones
         stick_deadzone = self.config.get("stick_deadzone", 0.1)
@@ -201,7 +207,7 @@ class JoyConController(AbstractController):
             hold_duration=recording_duration,
             require_simultaneous=True,
             grace_period=combo_grace_period,
-            on_triggered=self._on_recording_triggered,
+            on_triggered=self._on_recording_combo_held,
         )
 
         # Head control toggle combo: + and - buttons simultaneously (shorter duration for quick toggle)
@@ -228,12 +234,10 @@ class JoyConController(AbstractController):
         self.exit_requested = True
         logger.critical("EMERGENCY EXIT ACTIVATED - Shutting down all systems")
 
-    def _on_recording_triggered(self) -> None:
-        """Handle recording toggle."""
-        self.recording_active = not self.recording_active
-        self.stats["recording_toggles"] += 1
-        state = "STARTED" if self.recording_active else "STOPPED"
-        logger.info(f"Recording {state} via JoyCon combo (L + R)")
+    def _on_recording_combo_held(self) -> None:
+        """Arm a recorder toggle; commit only after both shoulders release."""
+        self._recording_release_armed = True
+        logger.info("Recording toggle armed — release L + R to commit")
 
     def _on_head_toggle_triggered(self) -> None:
         """Handle head control toggle."""
@@ -245,12 +249,10 @@ class JoyConController(AbstractController):
         prev_base = self.base_active
         prev_head = self.head_active
         prev_torso = self.torso_active
-        prev_fine = self.fine_adjustment_active
 
         self.base_active = False
         self.head_active = False
         self.torso_active = False
-        self.fine_adjustment_active = False
 
         # Toggle the requested mode
         if mode == "base":
@@ -276,13 +278,6 @@ class JoyConController(AbstractController):
                 logger.info("Torso control ACTIVATED")
             else:
                 logger.info("Torso control DEACTIVATED")
-
-        elif mode == "fine":
-            self.fine_adjustment_active = not prev_fine
-            if self.fine_adjustment_active:
-                logger.info("Fine adjustment ACTIVATED")
-            else:
-                logger.info("Fine adjustment DEACTIVATED")
 
     def process(self, joycon_data: Dict[str, Any]) -> RobotCommands:
         """Process JoyCon data and return commands for all components.
@@ -327,6 +322,18 @@ class JoyConController(AbstractController):
         # Update button manager and get events
         events = self.button_manager.update(raw_states)
 
+        left_l_raw = bool(raw_states.get("left_l", False))
+        right_r_raw = bool(raw_states.get("right_r", False))
+        recording_chord_active = left_l_raw and right_r_raw
+        if self._recording_release_armed:
+            recording_chord_active = True
+            if not left_l_raw and not right_r_raw:
+                self._recording_release_armed = False
+                self._recording_toggle_requested = True
+                self.stats["recording_toggles"] += 1
+                recording_chord_active = False
+                logger.info("Recording toggle requested via JoyCon (L + R)")
+
         # Debug: log button press events
         for button_name, event in events.items():
             if event == ButtonEvent.PRESSED:
@@ -343,6 +350,7 @@ class JoyConController(AbstractController):
 
         # Check for active estop
         if self.estop_active:
+            self.hand_controller.require_gripper_neutral()
             commands.estop = True
             commands.priority = "estop"
 
@@ -379,40 +387,36 @@ class JoyConController(AbstractController):
         elif "right_zr" in events and events["right_zr"] == ButtonEvent.PRESSED:
             self._toggle_mode("torso")
 
-        # Check for fine adjustment toggle (but avoid conflict with recording combo)
-        # Only toggle fine adjustment if not both L and R are pressed (recording combo)
-        left_l_pressed = "left_l" in events and events["left_l"] == ButtonEvent.PRESSED
-        right_r_pressed = (
-            "right_r" in events and events["right_r"] == ButtonEvent.PRESSED
-        )
-        both_lr_pressed = raw_states.get("left_l", False) and raw_states.get(
-            "right_r", False
-        )
-
-        if left_l_pressed and not both_lr_pressed:
-            self._toggle_mode("fine")
-        elif right_r_pressed and not both_lr_pressed:
-            self._toggle_mode("fine")
-
         # Process active control mode
         if self.base_active:
+            self.hand_controller.require_gripper_neutral()
             commands.base = self.base_controller.process(joycon_data)
             commands.priority = "base"
             return commands
 
         if self.head_active:
+            self.hand_controller.require_gripper_neutral()
             commands.head = self.head_controller.process(joycon_data)
             commands.priority = "head"
             return commands
 
         if self.torso_active:
+            self.hand_controller.require_gripper_neutral()
             commands.torso = self.torso_controller.process(joycon_data)
             commands.priority = "torso"
             return commands
 
-        # Hand control (includes fine adjustment mode)
-        if self.hand_controller.is_active(joycon_data) or self.fine_adjustment_active:
-            joycon_data["fine_adjustment_active"] = self.fine_adjustment_active
+        # L+R is exclusively a recorder chord. Freeze gripper output while
+        # both shoulders are down and require neutral before analog control
+        # can resume after release.
+        if recording_chord_active:
+            self.hand_controller.require_gripper_neutral()
+            commands.priority = "hands"
+            return commands
+
+        # Hand control. Gripper fine control is always available on the two
+        # stick Y axes; L/R have no individual hand-control behavior.
+        if self.hand_controller.is_active(joycon_data):
             commands.hands = self.hand_controller.process(joycon_data)
             commands.priority = "hands"
             self.stats["hand_activations"] += 1
@@ -437,7 +441,7 @@ class JoyConController(AbstractController):
             return "head"
         elif self.torso_active:
             return "torso"
-        elif self.hand_controller.is_active(joycon_data) or self.fine_adjustment_active:
+        elif self.hand_controller.is_active(joycon_data):
             return "hands"
         else:
             return "none"
@@ -503,18 +507,20 @@ class JoyConController(AbstractController):
             "base": self.base_active,
             "head": self.head_active,
             "torso": self.torso_active,
-            "fine_adjustment": self.fine_adjustment_active,
+            # Compatibility key for existing status consumers. Fine gripper
+            # control is now always available in hand mode, never latched.
+            "fine_adjustment": False,
         }
 
     def get_recording_command(self) -> Optional[str]:
-        """Get the recording command to send based on current state.
+        """Consume a recorder-authoritative toggle request.
 
         Returns:
-            "start" if recording should start, "stop" if recording should stop, None otherwise
+            ``"toggle"`` once after a completed L+R gesture, otherwise None.
+            The recorder decides whether that means start or stop from its
+            authoritative ``is_recording`` state.
         """
-        # Only return command on state change
-        if self._last_recording_state != self.recording_active:
-            self._last_recording_state = self.recording_active
-            return "start" if self.recording_active else "stop"
-
+        if self._recording_toggle_requested:
+            self._recording_toggle_requested = False
+            return "toggle"
         return None

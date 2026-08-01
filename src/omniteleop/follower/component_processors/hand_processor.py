@@ -4,6 +4,7 @@ import os
 from typing import Dict, Any
 
 from dexmotion.utils import robot_utils
+from loguru import logger
 
 from omniteleop.follower.component_processors.base_processor import (
     BaseComponentProcessor,
@@ -53,6 +54,7 @@ class HandProcessor(BaseComponentProcessor):
         # Local last-published positions, used as the relative-mode anchor
         # when MotionManager doesn't carry hand state.
         self._last_pos: list = []
+        self._missing_anchor_warned = False
 
     @property
     def component_type(self) -> str:
@@ -97,14 +99,23 @@ class HandProcessor(BaseComponentProcessor):
             return False
 
         # Resolve relative-mode anchor.
-        if mode == CommandMode.RELATIVE:
+        if mode in (CommandMode.RELATIVE, CommandMode.RELATIVE.value):
             if self.lock_collision_avoidance:
-                anchor = self._last_pos or [0.0] * len(self.joint_names)
+                anchor = self._last_pos
             else:
                 current_positions = self.motion_manager.get_joint_pos_dict()
                 anchor = [
-                    current_positions.get(name, 0) for name in self.joint_names
+                    current_positions.get(name) for name in self.joint_names
                 ]
+            if len(anchor) < len(positions) or any(value is None for value in anchor):
+                if not self._missing_anchor_warned:
+                    logger.warning(
+                        f"{self.component_name} fine control ignored: "
+                        "current gripper position is not synchronized"
+                    )
+                    self._missing_anchor_warned = True
+                return False
+            self._missing_anchor_warned = False
             positions = [a + d for a, d in zip(anchor, positions)]
 
         if self.lock_collision_avoidance:
@@ -137,8 +148,13 @@ class HandProcessor(BaseComponentProcessor):
 
         if updated_positions:
             self.motion_manager.set_joint_pos(updated_positions)
+            clipped = [
+                float(updated_positions[name])
+                for name in self.joint_names[: len(positions)]
+            ]
+            self._last_pos = list(clipped)
             command.output_components[self.component_name] = {
-                "pos": positions,
+                "pos": clipped,
                 "mode": CommandMode.ABSOLUTE.value,
             }
             return True
@@ -162,6 +178,7 @@ class HandProcessor(BaseComponentProcessor):
             self._last_pos = [
                 hand_pos[i] for i in range(min(len(hand_pos), len(self.joint_names)))
             ]
+            self._missing_anchor_warned = False
             return
         motion_manager_joints = {}
         for i, pos in enumerate(hand_pos):
@@ -169,3 +186,7 @@ class HandProcessor(BaseComponentProcessor):
                 motion_manager_joints[self.joint_names[i]] = pos
         if motion_manager_joints:
             self.motion_manager.set_joint_pos(motion_manager_joints)
+            self._last_pos = [
+                hand_pos[i] for i in range(min(len(hand_pos), len(self.joint_names)))
+            ]
+            self._missing_anchor_warned = False

@@ -12,7 +12,6 @@ four hooks: ``_setup_storage``, ``_collect_observation``, ``_write_frame``,
 
 import os
 import sys
-import time
 import pickle
 import shutil
 import json
@@ -27,12 +26,13 @@ import cv2  # type: ignore
 import tyro
 from loguru import logger
 
-from dexcontrol.robot import Robot
 from dexcontrol.core.config import get_robot_config
 
 from omniteleop.common import get_config
 from omniteleop.common.logging import setup_logging
+from omniteleop.read_only_robot import ReadOnlyRobot
 from omniteleop.record.base_recorder import BaseRecorder
+from omniteleop.record.sensors import CameraFreshnessGuard
 
 
 def _save_single_image(args: Tuple[str, np.ndarray, bool, int]) -> None:
@@ -145,7 +145,11 @@ class MDPEpisode:
             "joint_pos": observation.get("joint_pos", {}),
             "joint_vel": observation.get("joint_vel", {}),
         }
-        images = {k: v for k, v in observation.items() if k not in ("joint_pos", "joint_vel")}
+        images = {
+            k: observation[k]
+            for k in self._IMAGE_TYPES
+            if observation.get(k) is not None
+        }
         self._transitions.append(MDPTransition(
             timestamp_ns=timestamp_ns,
             observation=dict(state=state, **images),
@@ -201,8 +205,15 @@ class MDPRecorder(BaseRecorder):
         recorder_config = self.config.get("recorder", {})
         self.compress_images = recorder_config.get("compress_images", True)
         self.num_workers = recorder_config.get("num_workers", 4)
+        wrist_cfg = recorder_config.get("wrist_camera_adapter", {}) or {}
+        self._wrist_startup_timeout_s = float(wrist_cfg.get("startup_timeout_s", 5.0))
+        wrist_stale_timeout_s = float(wrist_cfg.get("stale_frame_timeout_s", 0.25))
+        self._wrist_freshness = {
+            side: CameraFreshnessGuard(side, wrist_stale_timeout_s)
+            for side in ("left", "right")
+        }
 
-        robot_config = os.environ.get("ROBOT_CONFIG", "vega_1_f5d6")
+        robot_config = os.environ.get("ROBOT_CONFIG", "vega_1u_gripper")
         self.hand_type = "gripper" if "gripper" in robot_config else "hand_f5d6"
 
         self.save_images = any(self.record_components[k] for k in (
@@ -231,10 +242,11 @@ class MDPRecorder(BaseRecorder):
         # rglob so episodes nested under MM-DD-YYYY day folders (and any legacy
         # flat ones) still count toward the resume sequence number.
         existing = list(self.save_dir.rglob(f"{self.episode_prefix}_*"))
+        prefix_len = len(self.episode_prefix.split("_"))
         nums = []
         for d in existing:
             try:
-                nums.append(int(d.name.split("_")[-1]))
+                nums.append(int(d.name.split("_")[prefix_len]))
             except (ValueError, IndexError):
                 continue
         return max(nums, default=-1) + 1
@@ -243,16 +255,26 @@ class MDPRecorder(BaseRecorder):
         super().initialize()
         robot_configs = get_robot_config()
         robot_configs.sensors["head_camera"].enabled = True
-        if self.record_components["left_wrist_rgb"] or self.record_components["right_wrist_rgb"]:
-            robot_configs.sensors["left_wrist_camera"].enabled = True
-            robot_configs.sensors["right_wrist_camera"].enabled = True
+        for side in ("left", "right"):
+            if self.record_components[f"{side}_wrist_rgb"]:
+                robot_configs.sensors[f"{side}_wrist_camera"].enabled = True
         try:
-            self.robot = Robot(configs=robot_configs)
+            self.robot = ReadOnlyRobot(configs=robot_configs)
             if self.save_images:
                 self.robot.sensors.head_camera.wait_for_active(timeout=5.0)
+            for side in ("left", "right"):
+                if not self.record_components[f"{side}_wrist_rgb"]:
+                    continue
+                camera = getattr(self.robot.sensors, f"{side}_wrist_camera")
+                if not camera.wait_for_active(timeout=self._wrist_startup_timeout_s):
+                    raise RuntimeError(
+                        f"{side} wrist camera produced no frame within "
+                        f"{self._wrist_startup_timeout_s:.1f}s"
+                    )
         except Exception as e:
             logger.error(f"Failed to initialize robot: {e}")
             self.robot = None
+            raise RuntimeError(f"Failed to initialize required recorder sensors: {e}") from e
 
     # ─── Hooks ─────────────────────────────────────────────────────────────
 
@@ -292,24 +314,33 @@ class MDPRecorder(BaseRecorder):
                 head_keys.append("left_rgb")
             if self.record_components["head_right_rgb"]:
                 head_keys.append("right_rgb")
+            img_dict: Dict[str, Any] = {}
             if head_keys:
                 img_dict = self.robot.sensors.head_camera.get_obs(obs_keys=head_keys)
                 img_dict = {f"head_{k}": v for k, v in img_dict.items()}
-                if self.record_components["left_wrist_rgb"]:
-                    img_dict["left_wrist_rgb"] = self.robot.sensors.left_wrist_camera.get_obs()
-                if self.record_components["right_wrist_rgb"]:
-                    img_dict["right_wrist_rgb"] = self.robot.sensors.right_wrist_camera.get_obs()
-                for k, v in img_dict.items():
-                    if v is None:
-                        continue
-                    img = v.get("data") if isinstance(v, dict) else v
-                    if img is None:
-                        continue
-                    if self.image_resolution:
-                        img = cv2.resize(img, self.image_resolution)
-                    if len(img.shape) == 3 and img.shape[2] == 3:
-                        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                    observation[k] = img
+            camera_timestamps: Dict[str, int] = {}
+            for side in ("left", "right"):
+                key = f"{side}_wrist_rgb"
+                if not self.record_components[key]:
+                    continue
+                value = getattr(
+                    self.robot.sensors, f"{side}_wrist_camera"
+                ).get_obs(include_timestamp=True)
+                img, capture_ts = self._wrist_freshness[side].validate(value)
+                img_dict[key] = img
+                camera_timestamps[key] = capture_ts
+            for k, v in img_dict.items():
+                if v is None:
+                    continue
+                img = v.get("data") if isinstance(v, dict) else v
+                if img is None:
+                    continue
+                if self.image_resolution:
+                    img = cv2.resize(img, self.image_resolution)
+                if len(img.shape) == 3 and img.shape[2] == 3:
+                    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                observation[k] = img
+            observation["_camera_timestamps_ns"] = camera_timestamps
         return observation
 
     def _write_frame(self, timestamp_ns: int, resolved_action: Dict[str, Any],
@@ -318,7 +349,11 @@ class MDPRecorder(BaseRecorder):
             timestamp_ns=timestamp_ns,
             observation=observation,
             action=resolved_action,
-            frame_metadata={"safety_flags": safety_flags, "transition_num": self.transitions_in_episode},
+            frame_metadata={
+                "safety_flags": safety_flags,
+                "transition_num": self.transitions_in_episode,
+                "camera_timestamps_ns": observation.get("_camera_timestamps_ns", {}),
+            },
         )
 
     def _finalize_storage(self, success: bool) -> None:
@@ -380,9 +415,11 @@ def main(
 
     try:
         recorder.initialize()
+        logger.info("RECORDER READY")
         recorder.run()
     except Exception as e:
         logger.error(f"❌ Recorder error: {e}")
+        return 1
     finally:
         recorder.cleanup()
 

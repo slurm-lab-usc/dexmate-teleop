@@ -29,7 +29,7 @@ def main(action: Literal["open", "close"] = "close") -> None:
         action: ``open`` or ``close`` for both hands.
     """
     logger.info("Initializing robot")
-    with Robot() as bot:
+    with Robot(configure_default_state=False) as bot:
         if action == "open":
             logger.info("Opening both hands")
             bot.left_hand.open_hand()

@@ -20,10 +20,13 @@ Writer. Adding a new body part = one new row here.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Any, Protocol
 
 import cv2
 import numpy as np
+
+from omniteleop.record.errors import RequiredSensorError
 
 
 @dataclass(frozen=True)
@@ -187,12 +190,46 @@ class HeadCamera:
         return out
 
 
-@dataclass(frozen=True)
+class CameraFreshnessGuard:
+    """Reject missing or non-advancing frames from a required camera."""
+
+    def __init__(self, side: str, stale_timeout_s: float) -> None:
+        self.side = side
+        self.stale_timeout_s = stale_timeout_s
+        self._last_timestamp_ns = 0
+        self._last_advance_monotonic = time.monotonic()
+
+    def validate(self, value: Any) -> tuple[np.ndarray, int]:
+        if not isinstance(value, dict) or value.get("data") is None:
+            raise RequiredSensorError(f"{self.side} wrist camera frame unavailable")
+        timestamp_ns = int(value.get("timestamp_ns") or 0)
+        if timestamp_ns <= 0:
+            raise RequiredSensorError(f"{self.side} wrist camera timestamp unavailable")
+
+        now_mono = time.monotonic()
+        if timestamp_ns != self._last_timestamp_ns:
+            self._last_timestamp_ns = timestamp_ns
+            self._last_advance_monotonic = now_mono
+        unchanged_s = now_mono - self._last_advance_monotonic
+        wall_age_s = max(0.0, (time.time_ns() - timestamp_ns) / 1e9)
+        if unchanged_s > self.stale_timeout_s or wall_age_s > self.stale_timeout_s:
+            raise RequiredSensorError(
+                f"{self.side} wrist camera stale "
+                f"(frame_age={wall_age_s:.3f}s, unchanged={unchanged_s:.3f}s)"
+            )
+        return np.asarray(value["data"]), timestamp_ns
+
+
+@dataclass
 class WristCamera:
     """Single-stream wrist RGB camera."""
 
     side: str  # "left" or "right"
     image_resolution: tuple[int, int]
+    stale_timeout_s: float = 0.25
+
+    def __post_init__(self) -> None:
+        self._freshness = CameraFreshnessGuard(self.side, self.stale_timeout_s)
 
     @property
     def _sensor_attr(self) -> str:
@@ -217,13 +254,15 @@ class WristCamera:
         if self.topic not in keep:
             return []
         value = getattr(robot.sensors, self._sensor_attr).get_obs(include_timestamp=True)
-        if value is None:
-            return []
-        img = cv2.resize(value["data"], self.image_resolution)
-        return [Reading(self.topic, img, int(value["timestamp_ns"]))]
+        payload, timestamp_ns = self._freshness.validate(value)
+        img = cv2.resize(payload, self.image_resolution)
+        return [Reading(self.topic, img, timestamp_ns)]
 
 
-def state_sensors(image_resolution: tuple[int, int]) -> tuple[StateSensor, ...]:
+def state_sensors(
+    image_resolution: tuple[int, int],
+    wrist_stale_timeout_s: float = 0.25,
+) -> tuple[StateSensor, ...]:
     """The full state-side registry. Returned as a tuple so each caller's
     list is independent (sensors carry per-recorder config like resolution)."""
     return (
@@ -236,8 +275,16 @@ def state_sensors(image_resolution: tuple[int, int]) -> tuple[StateSensor, ...]:
         WrenchSensor(side="left"),
         WrenchSensor(side="right"),
         HeadCamera(image_resolution=image_resolution),
-        WristCamera(side="left", image_resolution=image_resolution),
-        WristCamera(side="right", image_resolution=image_resolution),
+        WristCamera(
+            side="left",
+            image_resolution=image_resolution,
+            stale_timeout_s=wrist_stale_timeout_s,
+        ),
+        WristCamera(
+            side="right",
+            image_resolution=image_resolution,
+            stale_timeout_s=wrist_stale_timeout_s,
+        ),
     )
 
 

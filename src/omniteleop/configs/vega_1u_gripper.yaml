@@ -38,7 +38,10 @@ input_handlers:
 
     # Hand configuration (gripper - 2 predefined poses: open/close)
     hands:
-      sensitivity: 0.05
+      # Always-on proportional fine control from each JoyCon stick Y axis.
+      fine_max_speed: 0.15
+      fine_stick_deadzone: 0.15
+      fine_max_dt: 0.10
       left:
         poses:
           open: [0.78]
@@ -146,7 +149,7 @@ robot_setup:
 # MDP Recorder configuration
 recorder:
   enabled: true
-  save_dir: "recordings"
+  save_dir: "/home/zinan/workspace/data/dexmate"
   episode_prefix: "episode"
   record_rate: 20.0
   save_images: true
@@ -161,6 +164,19 @@ recorder:
   depth:
     min_range: 0.1
     max_range: 8.0
+
+  # Local UVC wrist cameras published on the standard Dexmate Zenoh topics.
+  wrist_camera_adapter:
+    enabled: true
+    left_device: "/dev/dexmate-wrist-left"
+    right_device: "/dev/dexmate-wrist-right"
+    capture_resolution: [1280, 720]
+    output_resolution: [960, 600]
+    fps: 30
+    fourcc: "MJPG"
+    startup_timeout_s: 5.0
+    stale_frame_timeout_s: 0.25
+    abort_after_s: 1.0
 
   # Component recording (upper body only)
   components:
@@ -186,4 +202,3 @@ init_pos:
   head: [0.5, 0.0, 0.0]
   left_hand: [0.78]
   right_hand: [0.78]
-

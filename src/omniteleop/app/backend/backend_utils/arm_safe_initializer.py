@@ -28,10 +28,20 @@ from loguru import logger
 
 from dexcontrol.core.arm import Arm
 from dexcontrol.robot import Robot
+from omniteleop.common.joint_state_safety import has_active_joint_error
+from omniteleop.common.tracking_watchdog import DelayedTrackingWatchdog
+from omniteleop.common.trajectory_safety import limit_sampled_joint_speed
 
 
 class ArmSafeInitializer:
     """Initializes robot arms to safe positions while avoiding self-collisions."""
+
+    TRACKING_TOLERANCE_RAD = 0.05
+    TRACKING_REFERENCE_DELAY_SECONDS = 0.12
+    TRACKING_VIOLATION_DURATION_SECONDS = 0.20
+    FINAL_REACH_TIMEOUT_SECONDS = 2.0
+    HOMING_MAX_JOINT_SPEED_RAD_S = 0.35
+    WAYPOINT_CATCHUP_TIMEOUT_SECONDS = 2.0
 
     def __init__(
         self,
@@ -51,6 +61,11 @@ class ArmSafeInitializer:
         # Initialize robot and components
         self.bot = bot if bot is not None else Robot()
         self.rate_limiter = RateLimiter(self.control_hz)
+        self._tracking_watchdog = DelayedTrackingWatchdog(
+            tolerance_rad=self.TRACKING_TOLERANCE_RAD,
+            reference_delay_s=self.TRACKING_REFERENCE_DELAY_SECONDS,
+            violation_duration_s=self.TRACKING_VIOLATION_DURATION_SECONDS,
+        )
 
         # Initialize arms and hands
         self.left_arm, self.right_arm = self._initialize_arms(self.bot)
@@ -123,18 +138,171 @@ class ArmSafeInitializer:
             rate_limiter: Rate limiter for controlling execution speed.
         """
         total_waypoints = len(trajectory)
+        final_left: np.ndarray | None = None
+        final_right: np.ndarray | None = None
         for i, waypoint in enumerate(trajectory):
-            left_joints = [v for k, v in waypoint.items() if "L_arm" in k]
-            right_joints = [v for k, v in waypoint.items() if "R_arm" in k]
+            left_joints = np.asarray(
+                [waypoint[name] for name in left_arm.joint_name],
+                dtype=float,
+            )
+            right_joints = np.asarray(
+                [waypoint[name] for name in right_arm.joint_name],
+                dtype=float,
+            )
 
-            left_arm.set_joint_pos(np.array(left_joints))
-            right_arm.set_joint_pos(np.array(right_joints))
+            final_left = left_joints
+            final_right = right_joints
+            targets = {
+                "left_arm": (left_arm, left_joints),
+                "right_arm": (right_arm, right_joints),
+            }
+            self._follow_waypoint_until_caught_up(
+                targets,
+                rate_limiter,
+            )
 
             # Show progress for long trajectories
             if total_waypoints > 10 and i % (total_waypoints // 10) == 0:
                 logger.info(f"Trajectory progress: {i}/{total_waypoints}")
 
+        if final_left is not None and final_right is not None:
+            self._wait_for_final_targets(
+                {
+                    "left_arm": (left_arm, final_left),
+                    "right_arm": (right_arm, final_right),
+                },
+                rate_limiter,
+            )
+
+    def _follow_waypoint_until_caught_up(
+        self,
+        targets: dict[str, tuple[Arm, np.ndarray]],
+        rate_limiter: RateLimiter,
+    ) -> None:
+        """Pause path advancement while either arm exceeds the lead limit."""
+        catchup_started: float | None = None
+        while True:
+            for arm, target in targets.values():
+                arm.set_joint_pos(target)
+
+            actuals = self._read_valid_arm_positions(targets)
+            errors = {
+                name: float(np.max(np.abs(actuals[name] - target)))
+                for name, (_arm, target) in targets.items()
+            }
+            if all(
+                error <= self.TRACKING_TOLERANCE_RAD
+                for error in errors.values()
+            ):
+                rate_limiter.sleep()
+                return
+
+            now = time.monotonic()
+            if catchup_started is None:
+                catchup_started = now
+            elif now - catchup_started >= self.WAYPOINT_CATCHUP_TIMEOUT_SECONDS:
+                raise RuntimeError(
+                    "Arm waypoint catch-up timed out: "
+                    + self._format_position_errors(targets, actuals)
+                )
             rate_limiter.sleep()
+
+    def _read_valid_arm_positions(
+        self,
+        targets: dict[str, tuple[Arm, np.ndarray]],
+    ) -> dict[str, np.ndarray]:
+        """Read arm positions and enforce state/error/limit invariants."""
+        actuals: dict[str, np.ndarray] = {}
+        for name, (arm, target) in targets.items():
+            state = arm._get_state()  # noqa: SLF001 - public getters omit errors
+            if has_active_joint_error(state.get("error")):
+                raise RuntimeError(f"{name} reports errors: {state['error']}")
+            actual = np.asarray(state.get("pos", []), dtype=float)
+            if actual.shape != target.shape or not bool(np.isfinite(actual).all()):
+                raise RuntimeError(f"{name} returned invalid position state")
+            limits = arm.joint_pos_limit
+            if limits is None or limits.shape != (actual.size, 2):
+                raise RuntimeError(f"{name} joint limits are unavailable")
+            outside = np.flatnonzero(
+                (actual < limits[:, 0] - 1e-3)
+                | (actual > limits[:, 1] + 1e-3)
+            )
+            if outside.size:
+                raise RuntimeError(
+                    f"{name} measured joints outside limits: {outside.tolist()}"
+                )
+            actuals[name] = actual
+        return actuals
+
+    @staticmethod
+    def _format_position_errors(
+        targets: dict[str, tuple[Arm, np.ndarray]],
+        actuals: dict[str, np.ndarray],
+    ) -> str:
+        formatted: dict[str, object] = {}
+        for name, (arm, target) in targets.items():
+            differences = np.abs(actuals[name] - target)
+            joint_index = int(np.argmax(differences))
+            formatted[name] = {
+                "joint": arm.joint_name[joint_index],
+                "error_rad": round(float(differences[joint_index]), 6),
+                "actual_rad": round(float(actuals[name][joint_index]), 6),
+                "target_rad": round(float(target[joint_index]), 6),
+            }
+        return str(formatted)
+
+    def _validate_arm_tracking(
+        self,
+        targets: dict[str, tuple[Arm, np.ndarray]],
+    ) -> None:
+        actuals = self._read_valid_arm_positions(targets)
+
+        errors = self._tracking_watchdog.update(
+            {name: target for name, (_arm, target) in targets.items()},
+            actuals,
+        )
+        if errors:
+            formatted: dict[str, object] = {}
+            for name, error in errors.items():
+                detail = self._tracking_watchdog.last_failure_details.get(name)
+                arm = targets[name][0]
+                if detail is None or detail.joint_index >= len(arm.joint_name):
+                    formatted[name] = error
+                    continue
+                formatted[name] = {
+                    "joint": arm.joint_name[detail.joint_index],
+                    "error_rad": round(detail.error_rad, 6),
+                    "actual_rad": round(detail.actual_rad, 6),
+                    "reference_rad": round(detail.reference_rad, 6),
+                }
+            raise RuntimeError(f"Arm trajectory tracking failed: {formatted}")
+
+    def _wait_for_final_targets(
+        self,
+        targets: dict[str, tuple[Arm, np.ndarray]],
+        rate_limiter: RateLimiter,
+    ) -> None:
+        deadline = time.monotonic() + self.FINAL_REACH_TIMEOUT_SECONDS
+        last_errors: dict[str, float] = {}
+        while time.monotonic() < deadline:
+            last_errors = {}
+            for name, (arm, target) in targets.items():
+                arm.set_joint_pos(target)
+                state = arm._get_state()  # noqa: SLF001
+                if has_active_joint_error(state.get("error")):
+                    raise RuntimeError(f"{name} reports errors: {state['error']}")
+                actual = np.asarray(state.get("pos", []), dtype=float)
+                if actual.shape != target.shape or not bool(np.isfinite(actual).all()):
+                    raise RuntimeError(f"{name} returned invalid final position state")
+                last_errors[name] = float(np.max(np.abs(actual - target)))
+            if all(
+                error <= self.TRACKING_TOLERANCE_RAD
+                for error in last_errors.values()
+            ):
+                self._validate_arm_tracking(targets)
+                return
+            rate_limiter.sleep()
+        raise RuntimeError(f"Arms failed to reach final target: {last_errors}")
 
     def run(
         self,
@@ -181,6 +349,21 @@ class ArmSafeInitializer:
             )
         )
 
+        qs_sample, scaling = limit_sampled_joint_speed(
+            qs_sample,
+            control_frequency=self.control_hz,
+            max_joint_speed_rad_s=self.HOMING_MAX_JOINT_SPEED_RAD_S,
+        )
+        scaled_duration = (len(qs_sample) - 1) / self.control_hz
+        logger.info(
+            "Safety time-scaling arm initialization: "
+            f"{scaling.original_waypoints} -> {scaling.scaled_waypoints} waypoints, "
+            f"planned peak={scaling.original_peak_speed_rad_s:.3f} rad/s, "
+            f"limit={self.HOMING_MAX_JOINT_SPEED_RAD_S:.3f} rad/s, "
+            f"duration={scaled_duration:.2f}s, "
+            f"scale={scaling.scale_factor:.2f}x"
+        )
+
         # Visualize trajectory
         if self.visualize:
             if self.motion_manager.visualizer is None:
@@ -188,7 +371,7 @@ class ArmSafeInitializer:
             self.motion_manager.visualizer.update_motion_plan(
                 motion_plan=qs_sample,
                 joint_names=joint_names,
-                duration=1.0,
+                duration=scaled_duration,
             )
 
         # Move the robot arms to the target configuration on the real robot

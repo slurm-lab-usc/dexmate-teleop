@@ -492,10 +492,10 @@ class RealRobotIKController(BaseIKController):
             mm_kwargs: Extra keyword arguments forwarded verbatim to
                 MotionManager via BaseIKController (e.g. ``custom_urdf_path``).
         """
-        from dexcontrol.robot import Robot
+        from omniteleop.read_only_robot import ReadOnlyRobot
 
         if bot is None:
-            self.bot = Robot()
+            self.bot = ReadOnlyRobot()
         else:
             self.bot = bot
 
@@ -513,8 +513,6 @@ class RealRobotIKController(BaseIKController):
         except Exception as e:
             logger.error(f"Error getting joint positions: {e}")
             raise
-
-        self.bot.heartbeat.pause()
 
         super().__init__(
             initial_joint_configuration_dict=joint_pos_dict,
@@ -697,10 +695,10 @@ class RealRobotElbowConstrainedIKController(ElbowConstrainedIKController):
             visualize: Whether to enable visualization.
             elbow_frames: Robot frame names for elbow links.
         """
-        from dexcontrol.robot import Robot
+        from omniteleop.read_only_robot import ReadOnlyRobot
 
         if bot is None:
-            self.bot = Robot()
+            self.bot = ReadOnlyRobot()
         else:
             self.bot = bot
 
@@ -717,8 +715,6 @@ class RealRobotElbowConstrainedIKController(ElbowConstrainedIKController):
         except Exception as e:
             logger.error(f"Error getting joint positions: {e}")
             raise
-
-        self.bot.heartbeat.pause()
 
         super().__init__(
             initial_joint_configuration_dict=joint_pos_dict,

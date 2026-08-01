@@ -44,6 +44,7 @@ class ExoJoyconHandler(BaseInputHandler):
             "torso": config.get("torso", {}),
             "hands": config.get("hands", {}),
             "gripper": config.get("gripper", {}),
+            "button_timings": config.get("button_timings", {}),
             # Add any joycon-specific settings (like deadzones)
             **config.get("joycon", {}),
         }

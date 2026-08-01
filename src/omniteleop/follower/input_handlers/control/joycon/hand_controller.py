@@ -19,15 +19,14 @@ class HandController(AbstractHandController):
     """Interprets JoyCon inputs for hand/gripper control.
 
     Control schemes (when no ZL/ZR is pressed):
-    - Basic gestures:
-        - Open hand: Left/Y button
-        - Close hand: Right/A button
+    - Gripper:
+        - Fine open/close: each side's stick Y axis
+        - Full open: D-pad Up / X
+        - Full close: D-pad Down / B
+    - Dexterous-hand gestures:
         - Pinch (thumb+index): Up/X button
         - Pinch (thumb+index+middle): Down/B button
         - Home pose: Capture/Home button
-    - Fine adjustment (L/R + controls):
-        - L/R + stick: Control thumb joints
-        - L/R + up/down or X/B: Control four fingers
     """
 
     def __init__(
@@ -69,19 +68,12 @@ class HandController(AbstractHandController):
         if self._has_modifiers(joycon_data):
             return command
 
-        # Get fine adjustment state from main controller
-        fine_adjustment_active = joycon_data.get("fine_adjustment_active", False)
-
         # Process left hand
-        left_input = self._parse_joycon_input(
-            "left", joycon_data, fine_adjustment_active
-        )
+        left_input = self._parse_joycon_input("left", joycon_data)
         left_result = self.left_effector.process_input(left_input)
 
         # Process right hand
-        right_input = self._parse_joycon_input(
-            "right", joycon_data, fine_adjustment_active
-        )
+        right_input = self._parse_joycon_input("right", joycon_data)
         right_result = self.right_effector.process_input(right_input)
 
         # Check if result is a tuple (positions, mode) or just positions
@@ -131,15 +123,13 @@ class HandController(AbstractHandController):
         return left_zl or right_zr
 
     def _parse_joycon_input(
-        self, side: str, joycon_data: Dict[str, Any], fine_adjustment_active: bool
+        self, side: str, joycon_data: Dict[str, Any]
     ) -> JoyConEndEffectorInput:
         """Parse JoyCon data for a specific side.
 
         Args:
             side: "left" or "right"
             joycon_data: Raw JoyCon data
-            fine_adjustment_active: Whether fine adjustment mode is active
-
         Returns:
             Parsed JoyConEndEffectorInput
         """
@@ -161,7 +151,7 @@ class HandController(AbstractHandController):
             zl_zr_pressed=zl_zr_pressed,
             l_r_pressed=l_r_pressed,
             buttons=buttons,
-            fine_adjustment_active=fine_adjustment_active,
+            fine_adjustment_active=False,
         )
 
     def is_active(self, joycon_data: Dict[str, Any]) -> bool:
@@ -183,3 +173,10 @@ class HandController(AbstractHandController):
     def get_right_effector(self) -> AbstractEndEffectorController:
         """Get the right end-effector controller."""
         return self.right_effector
+
+    def require_gripper_neutral(self) -> None:
+        """Require both gripper sticks to return to neutral before motion."""
+        for effector in (self.left_effector, self.right_effector):
+            require_neutral = getattr(effector, "require_neutral", None)
+            if callable(require_neutral):
+                require_neutral()

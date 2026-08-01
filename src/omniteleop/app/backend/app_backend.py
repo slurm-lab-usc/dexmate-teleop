@@ -37,7 +37,9 @@ from loguru import logger
 import uvicorn
 
 from omniteleop.common import get_config
+from omniteleop.common.joint_state_safety import has_active_joint_error
 from omniteleop.common.logging import setup_logging
+from omniteleop.read_only_robot import ReadOnlyRobot, SoftwareEStopControl
 
 from omniteleop.app.backend.state_checker import StateChecker
 from omniteleop.app.backend.backend_utils.state_manager import state_manager
@@ -49,6 +51,162 @@ from omniteleop.app.backend.backend_utils.video_publisher import video_publisher
 # record_mode=true at /teleop/start). The backend only publishes control
 # commands on the recorder_control topic and reads status from the
 # subprocess's stdout — no in-process MCAP writing.
+
+
+def _create_doctor_robot() -> Robot:
+    """Create a Doctor control client that is safe to construct in a worker thread."""
+    return Robot(
+        auto_shutdown=False,
+        configure_default_state=False,
+    )
+
+
+_ARM_NAMES = ("left_arm", "right_arm")
+_ARM_DOF = 7
+
+
+def _read_arm_brake_status(bot: Robot) -> Dict[str, Any]:
+    """Return per-joint brake-release state and live position for both arms."""
+    arms: Dict[str, Any] = {}
+    any_released = False
+    for arm_name in _ARM_NAMES:
+        arm = getattr(bot, arm_name, None)
+        if arm is None:
+            continue
+        position = np.asarray(arm.get_joint_pos(), dtype=float)
+        limits = arm.joint_pos_limit
+        if position.shape != (_ARM_DOF,) or not bool(np.isfinite(position).all()):
+            raise RuntimeError(f"{arm_name} returned invalid position state")
+        if limits is None or limits.shape != (_ARM_DOF, 2):
+            raise RuntimeError(f"{arm_name} joint limits are unavailable")
+
+        status = arm.get_brake_status()
+        if not isinstance(status, dict) or status.get("success") is not True:
+            raise RuntimeError(f"{arm_name} brake status query failed: {status}")
+        enabled = bool(status.get("enabled", False))
+        raw_joints = status.get("joints") or []
+        try:
+            released = {
+                int(index)
+                for index in raw_joints
+                if 0 <= int(index) < _ARM_DOF
+            }
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"{arm_name} returned invalid released-joint data: {raw_joints}"
+            ) from exc
+        # Some firmware versions report enabled=true with an empty list for
+        # an all-joint release. Treat that conservatively as every joint.
+        if enabled and not released:
+            released = set(range(_ARM_DOF))
+
+        joint_names = list(getattr(arm, "joint_name", []) or [])
+        side_prefix = "L" if arm_name == "left_arm" else "R"
+        joints = []
+        for index in range(_ARM_DOF):
+            lower = float(limits[index, 0])
+            upper = float(limits[index, 1])
+            value = float(position[index])
+            joints.append(
+                {
+                    "index": index,
+                    "name": (
+                        str(joint_names[index])
+                        if len(joint_names) == _ARM_DOF
+                        else f"{side_prefix}_arm_j{index + 1}"
+                    ),
+                    "position_rad": value,
+                    "limits_rad": [lower, upper],
+                    "outside_limits": not lower <= value <= upper,
+                    "released": enabled and index in released,
+                }
+            )
+        any_released = any_released or enabled
+        arms[arm_name] = {
+            "enabled": enabled,
+            "released_joints": sorted(released) if enabled else [],
+            "message": str(status.get("message", "")),
+            "joints": joints,
+        }
+
+    return {
+        "ok": True,
+        "any_released": any_released,
+        "arms": arms,
+    }
+
+
+def _require_arm_brakes_engaged(report: Dict[str, Any]) -> None:
+    """Refuse motion whenever any arm reports brake release enabled."""
+    released = [
+        f"{arm_name} joints={arm_status.get('released_joints', [])}"
+        for arm_name, arm_status in report.get("arms", {}).items()
+        if arm_status.get("enabled")
+    ]
+    if released:
+        raise RuntimeError(
+            "Brake release is active; disable all brake release before movement ("
+            + "; ".join(released)
+            + ")"
+        )
+
+
+def _control_arm_brake(
+    bot: Robot,
+    action: str,
+    *,
+    arm_name: str | None = None,
+    joint_index: int | None = None,
+    confirmed: bool = False,
+) -> Dict[str, Any]:
+    """Release one selected joint or disable release on every active arm."""
+    before = _read_arm_brake_status(bot)
+    selected: Dict[str, Any] | None = None
+
+    if action == "release":
+        if confirmed is not True:
+            raise ValueError("Explicit physical-support confirmation is required")
+        if before["any_released"]:
+            raise ValueError(
+                "A joint is already released; disable all brake release before "
+                "selecting another joint"
+            )
+        if arm_name not in _ARM_NAMES:
+            raise ValueError("arm must be 'left_arm' or 'right_arm'")
+        if isinstance(joint_index, bool) or not isinstance(joint_index, int):
+            raise ValueError("joint_index must be an integer from 0 to 6")
+        if not 0 <= joint_index < _ARM_DOF:
+            raise ValueError("joint_index must be an integer from 0 to 6")
+        arm = getattr(bot, arm_name, None)
+        if arm is None:
+            raise ValueError(f"{arm_name} is unavailable")
+        selected = before["arms"][arm_name]["joints"][joint_index]
+        response = arm.release_brake(True, joints=[joint_index])
+        if not isinstance(response, dict) or response.get("success") is not True:
+            raise RuntimeError(
+                f"{arm_name} joint {joint_index + 1} brake release failed: {response}"
+            )
+    elif action == "engage":
+        for current_arm_name, arm_status in before["arms"].items():
+            if not arm_status.get("enabled"):
+                continue
+            arm = getattr(bot, current_arm_name)
+            response = arm.release_brake(False)
+            if not isinstance(response, dict) or response.get("success") is not True:
+                raise RuntimeError(
+                    f"{current_arm_name} brake engage failed: {response}"
+                )
+    elif action != "status":
+        raise ValueError("action must be 'release', 'engage', or 'status'")
+
+    result = _read_arm_brake_status(bot)
+    result["action"] = action
+    if selected is not None:
+        result["selected_joint"] = selected
+        result["selected_arm"] = arm_name
+    if action == "engage" and result["any_released"]:
+        raise RuntimeError("Brake release remained active after engage request")
+    return result
 
 
 def _resolve_zenoh_cert(zenoh_base: Path, name: str) -> Optional[Path]:
@@ -93,6 +251,15 @@ def _autodetect_zenoh_cert(zenoh_base: Path) -> Optional[Path]:
 
 class TeleopApp:
     """Manages the full teleop stack and exposes a FastAPI server to the frontend."""
+
+    # Subprocess that owns the arms. It is stopped last and given extra time for
+    # measured-pose hold, mode transition, and drift verification; see
+    # omniteleop.follower.safe_shutdown. A successful disable response is not
+    # evidence of mechanical brake engagement.
+    ARM_HOLDER_PROC = "robot_controller"
+    # release_brake(False) may take 45 s, followed by the mode service timeout.
+    ARM_HOLDER_STOP_GRACE_S = 70.0
+    PROC_STOP_GRACE_S = 5.0
 
     def __init__(
         self,
@@ -169,6 +336,9 @@ class TeleopApp:
         self._procs: List[subprocess.Popen] = []
         self._proc_names: List[str] = []  # parallel name list for each proc
         self._teleop_running = False  # True once start_teleop() succeeds
+        self.teleop_lifecycle = "stopped"
+        self._lifecycle_task: Optional[asyncio.Task] = None
+        self._doctor_lock = asyncio.Lock()
         self._teleop_env: Dict[str, str] = {}  # env passed from frontend at start
 
         # ---- per-process log ring-buffers & subscribers -------------------
@@ -179,7 +349,8 @@ class TeleopApp:
         self._log_loop: Optional[asyncio.AbstractEventLoop] = None
 
         # ---- robot / state -------------------------------------------------
-        self.robot: Optional[Robot] = None
+        self.robot: Optional[ReadOnlyRobot] = None
+        self._estop_control: Optional[SoftwareEStopControl] = None
         self._node = Node(name="app_backend", namespace=namespace)
         # Dual estop tracking: GUI and command_processor are independent sources.
         # Effective estop = gui_estop OR cmd_estop.
@@ -204,6 +375,7 @@ class TeleopApp:
         self.is_recording = False
         # One of: "idle", "recording", "saved", "discarded", "crashed", "stopped"
         self.recording_status: str = "idle"
+        self.recorder_ready: bool = False
         self.episode_dir_name: Optional[str] = None
         self._recorder_ctrl_pub = None  # lazily created in _start_teleop_procs
 
@@ -327,6 +499,11 @@ class TeleopApp:
                     "data": self.recorder_format,
                 },
                 {
+                    "topic": "recorder_ready",
+                    "data_type": "boolean",
+                    "data": self.recorder_ready,
+                },
+                {
                     "topic": "record_mode",
                     "data_type": "boolean",
                     "data": self.record_mode,
@@ -335,6 +512,11 @@ class TeleopApp:
                     "topic": "teleop_running",
                     "data_type": "boolean",
                     "data": self._teleop_running,
+                },
+                {
+                    "topic": "teleop_lifecycle",
+                    "data_type": "string",
+                    "data": self.teleop_lifecycle,
                 },
                 {
                     "topic": "leader_mode",
@@ -523,6 +705,8 @@ class TeleopApp:
             sensors = [
                 {"id": "camera_1", "data_type": "video/x-motion-jpeg"},
                 {"id": "camera_2", "data_type": "video/x-motion-jpeg"},
+                {"id": "left_wrist", "data_type": "video/x-motion-jpeg"},
+                {"id": "right_wrist", "data_type": "video/x-motion-jpeg"},
             ]
             return JSONResponse(content=sensors)
 
@@ -537,12 +721,12 @@ class TeleopApp:
                 "record_mode": false,
                 "env": {
                     "ROBOT_NAME": "...",
-                    "ROBOT_CONFIG": "vega_1_f5d6",
+                    "ROBOT_CONFIG": "vega_1u_gripper",
                     "ZENOH_CONFIG": "/path/to/zenoh.json"
                 }
             }
             """
-            if self._teleop_running:
+            if self.teleop_lifecycle not in {"stopped", "failed"}:
                 raise HTTPException(status_code=409, detail="Teleop already running")
             if await state_manager.is_estop():
                 raise HTTPException(
@@ -572,8 +756,14 @@ class TeleopApp:
             user_env: Dict[str, str] = {
                 k: str(v) for k, v in (body.get("env") or {}).items() if v
             }
-            self._start_teleop_procs(user_env)
-            return JSONResponse(content=await build_state_dict())
+            self.teleop_lifecycle = "starting"
+            self._lifecycle_task = asyncio.create_task(
+                self._start_teleop_background(user_env)
+            )
+            return JSONResponse(
+                content=await build_state_dict(),
+                status_code=202,
+            )
 
         @app.post("/teleop/stop")
         async def teleop_stop():
@@ -583,21 +773,26 @@ class TeleopApp:
             EOF branch in _tail_proc will flip is_recording/recording_status
             if we were mid-episode, so nothing special to do here.
             """
-            self._stop_teleop_procs()
-            # Reset estop so the user can Start again cleanly. Without this,
-            # stopping teleop while estop is active leaves software_estop=True
-            # and the frontend keeps the Start button hidden.
-            self._gui_estop = False
-            self._cmd_estop = False
-            await state_manager.clear_estop()
-            if self.robot and hasattr(self.robot, "estop"):
-                try:
-                    self.robot.estop.deactivate()
-                except Exception as exc:
-                    logger.warning(
-                        f"Hardware estop release during /teleop/stop failed: {exc}"
-                    )
-            return JSONResponse(content=await build_state_dict())
+            if self.teleop_lifecycle == "starting":
+                raise HTTPException(
+                    status_code=409,
+                    detail="Teleop is still starting; wait for running or failed state",
+                )
+            if self.teleop_lifecycle == "stopping":
+                return JSONResponse(
+                    content=await build_state_dict(),
+                    status_code=202,
+                )
+            if self.teleop_lifecycle == "stopped":
+                raise HTTPException(status_code=409, detail="Teleop is not running")
+            self.teleop_lifecycle = "stopping"
+            self._lifecycle_task = asyncio.create_task(
+                self._stop_teleop_background()
+            )
+            return JSONResponse(
+                content=await build_state_dict(),
+                status_code=202,
+            )
 
         # -- Doctor actions (manual robot recovery from the UI) --
         #
@@ -634,11 +829,12 @@ class TeleopApp:
         @app.post("/doctor/clear_error")
         async def doctor_clear_error():
             """Clear error state on all robot components."""
+            self._require_doctor_exclusive()
             failed: list[str] = []
 
             def _run() -> None:
                 with _doctor_env_scope():
-                    with Robot() as bot:
+                    with _create_doctor_robot() as bot:
                         for component in _DOCTOR_CLEAR_COMPONENTS:
                             try:
                                 bot.clear_error(component)
@@ -646,7 +842,8 @@ class TeleopApp:
                                 failed.append(f"{component}: {exc}")
 
             try:
-                await asyncio.to_thread(_run)
+                async with self._doctor_lock:
+                    await asyncio.to_thread(_run)
             except Exception as exc:
                 logger.exception("doctor/clear_error failed")
                 raise HTTPException(status_code=500, detail=str(exc))
@@ -657,28 +854,231 @@ class TeleopApp:
         @app.post("/doctor/init_arm_safe")
         async def doctor_init_arm_safe():
             """Move both arms to the zero pose via collision-aware planning."""
+            self._require_doctor_exclusive()
+            result: Dict[str, Any] = {}
 
             def _run() -> None:
                 from omniteleop.app.backend.backend_utils.arm_safe_initializer import (
                     ArmSafeInitializer,
                 )
+
                 with _doctor_env_scope():
-                    with Robot() as bot:
-                        initializer = ArmSafeInitializer(visualize=False, bot=bot)
-                        initializer.run(
-                            target="zero", shutdown_after_execution=False
+                    with _create_doctor_robot() as bot:
+                        _require_arm_brakes_engaged(
+                            _read_arm_brake_status(bot)
                         )
+                        arms = {
+                            name: getattr(bot, name)
+                            for name in _ARM_NAMES
+                            if getattr(bot, name, None) is not None
+                        }
+                        starts: Dict[str, np.ndarray] = {}
+                        for name, arm in arms.items():
+                            state = arm._get_state()  # noqa: SLF001
+                            position = np.asarray(state.get("pos", []), dtype=float)
+                            limits = arm.joint_pos_limit
+                            if (
+                                position.shape != (7,)
+                                or not bool(np.isfinite(position).all())
+                                or limits is None
+                                or limits.shape != (7, 2)
+                            ):
+                                raise RuntimeError(
+                                    f"{name} has invalid position or limit data"
+                                )
+                            outside = np.flatnonzero(
+                                (position < limits[:, 0] - 1e-3)
+                                | (position > limits[:, 1] + 1e-3)
+                            )
+                            if outside.size:
+                                raise RuntimeError(
+                                    f"{name} remains outside joint limits at "
+                                    f"indices {outside.tolist()}"
+                                )
+                            starts[name] = position.copy()
+                            if has_active_joint_error(state.get("error")):
+                                bot.clear_error(name)
+                                clear_deadline = time.monotonic() + 2.0
+                                while time.monotonic() < clear_deadline:
+                                    if not has_active_joint_error(
+                                        arm._get_state().get("error")  # noqa: SLF001
+                                    ):
+                                        break
+                                    time.sleep(0.02)
+                                else:
+                                    raise RuntimeError(
+                                        f"{name} error remained latched after clear"
+                                    )
+
+                        bot.estop.deactivate()
+                        position_mode_ready = False
+                        try:
+                            for name, arm in arms.items():
+                                response = arm.set_modes(["position"] * 7)
+                                if (
+                                    not isinstance(response, dict)
+                                    or response.get("success") is not True
+                                ):
+                                    raise RuntimeError(
+                                        f"{name} position mode failed: {response}"
+                                    )
+                            position_mode_ready = True
+
+                            hold_deadline = time.monotonic() + 0.5
+                            while time.monotonic() < hold_deadline:
+                                for name, arm in arms.items():
+                                    arm.set_joint_pos(starts[name], wait_time=0.0)
+                                time.sleep(0.01)
+                            hold_drift = {
+                                name: float(
+                                    np.max(
+                                        np.abs(
+                                            np.asarray(
+                                                arm.get_joint_pos(), dtype=float
+                                            )
+                                            - starts[name]
+                                        )
+                                    )
+                                )
+                                for name, arm in arms.items()
+                            }
+                            if any(value > 0.02 for value in hold_drift.values()):
+                                raise RuntimeError(
+                                    f"Measured-pose hold failed: {hold_drift}"
+                                )
+
+                            initializer = ArmSafeInitializer(
+                                visualize=False,
+                                bot=bot,
+                            )
+                            initializer.run(
+                                target="zero",
+                                shutdown_after_execution=False,
+                            )
+                            goal = initializer._create_goal_configuration("zero")
+                            final_error = {}
+                            final_position = {}
+                            final_targets = {}
+                            for name, arm in arms.items():
+                                actual = np.asarray(
+                                    arm.get_joint_pos(), dtype=float
+                                )
+                                target = np.asarray(
+                                    [goal[joint] for joint in arm.joint_name],
+                                    dtype=float,
+                                )
+                                final_position[name] = actual.tolist()
+                                final_targets[name] = target
+                                final_error[name] = float(
+                                    np.max(np.abs(actual - target))
+                                )
+                            if any(value > 0.05 for value in final_error.values()):
+                                raise RuntimeError(
+                                    f"Safe init final pose verification failed: "
+                                    f"{final_error}"
+                                )
+
+                            # Doctor init is a transition into the Teleop start pose,
+                            # not a terminal shutdown operation. Keep position mode
+                            # active and leave the final target latched for the next
+                            # control owner instead of disabling the arms here.
+                            final_hold_deadline = time.monotonic() + 0.5
+                            while time.monotonic() < final_hold_deadline:
+                                for name, arm in arms.items():
+                                    arm.set_joint_pos(
+                                        final_targets[name],
+                                        wait_time=0.0,
+                                    )
+                                time.sleep(0.01)
+                            result.update(
+                                {
+                                    "ok": True,
+                                    "start_position": {
+                                        name: value.tolist()
+                                        for name, value in starts.items()
+                                    },
+                                    "final_position": final_position,
+                                    "hold_drift_rad": hold_drift,
+                                    "max_final_error_rad": final_error,
+                                    "terminal_mode": "position",
+                                }
+                            )
+                        except Exception:
+                            # Never transition to disable here: hardware tests
+                            # showed that both arms can fall after disable. If
+                            # position mode was established, briefly latch the
+                            # last measured pose before the client disconnects.
+                            if position_mode_ready:
+                                failure_targets = {
+                                    name: np.asarray(
+                                        arm.get_joint_pos(), dtype=float
+                                    ).copy()
+                                    for name, arm in arms.items()
+                                }
+                                failure_hold_deadline = time.monotonic() + 0.5
+                                while time.monotonic() < failure_hold_deadline:
+                                    for name, arm in arms.items():
+                                        arm.set_joint_pos(
+                                            failure_targets[name],
+                                            wait_time=0.0,
+                                        )
+                                    time.sleep(0.01)
+                            raise
 
             try:
-                await asyncio.to_thread(_run)
+                async with self._doctor_lock:
+                    await asyncio.to_thread(_run)
             except Exception as exc:
                 logger.exception("doctor/init_arm_safe failed")
                 raise HTTPException(status_code=500, detail=str(exc))
-            return JSONResponse(content={"ok": True})
+            return JSONResponse(content=result)
+
+        @app.post("/doctor/arm_brakes")
+        async def doctor_arm_brakes(request: Request):
+            """Read both arms, release one selected joint, or engage all brakes."""
+            self._require_doctor_exclusive()
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            action = str(body.get("action", "status")).lower()
+            arm_name = body.get("arm")
+            raw_joint_index = body.get("joint_index")
+            joint_index = (
+                raw_joint_index
+                if isinstance(raw_joint_index, int)
+                and not isinstance(raw_joint_index, bool)
+                else None
+            )
+            confirmed = body.get("confirmed") is True
+            result: Dict[str, Any] = {}
+
+            def _run() -> None:
+                nonlocal result
+                with _doctor_env_scope():
+                    with _create_doctor_robot() as bot:
+                        result = _control_arm_brake(
+                            bot,
+                            action,
+                            arm_name=arm_name,
+                            joint_index=joint_index,
+                            confirmed=confirmed,
+                        )
+
+            try:
+                async with self._doctor_lock:
+                    await asyncio.to_thread(_run)
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except Exception as exc:
+                logger.exception(f"doctor/arm_brakes ({action}) failed")
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+            return JSONResponse(content=result)
 
         @app.post("/doctor/hand")
         async def doctor_hand(request: Request):
             """Open or close both hands."""
+            self._require_doctor_exclusive()
             body = await request.json()
             action = body.get("action")
             if action not in ("open", "close"):
@@ -689,7 +1089,10 @@ class TeleopApp:
 
             def _run() -> None:
                 with _doctor_env_scope():
-                    with Robot() as bot:
+                    with _create_doctor_robot() as bot:
+                        _require_arm_brakes_engaged(
+                            _read_arm_brake_status(bot)
+                        )
                         if action == "open":
                             bot.left_hand.open_hand()
                             bot.right_hand.open_hand()
@@ -698,7 +1101,8 @@ class TeleopApp:
                             bot.right_hand.close_hand()
 
             try:
-                await asyncio.to_thread(_run)
+                async with self._doctor_lock:
+                    await asyncio.to_thread(_run)
             except Exception as exc:
                 logger.exception(f"doctor/hand ({action}) failed")
                 raise HTTPException(status_code=500, detail=str(exc))
@@ -723,6 +1127,12 @@ class TeleopApp:
                 raise HTTPException(
                     status_code=503,
                     detail="Recorder control publisher not ready",
+                )
+            recorder_name = f"{self.recorder_format}_recorder"
+            if not self.recorder_ready or not self._is_process_running(recorder_name):
+                raise HTTPException(
+                    status_code=503,
+                    detail="Recorder is not ready; check recorder and wrist camera logs",
                 )
             try:
                 body = await request.json()
@@ -784,11 +1194,14 @@ class TeleopApp:
             await video_publisher.stop_all_streams()
             # Recorder stops itself on estop via its robot_commands subscriber
             # (auto_stop_on_estop in BaseRecorder) — no need to do it here.
-            if self.robot and hasattr(self.robot, "estop"):
-                try:
-                    self.robot.estop.activate()
-                except Exception as exc:
-                    logger.error(f"Hardware estop failed: {exc}")
+            try:
+                await self._set_software_estop(True)
+            except Exception as exc:
+                logger.error(f"Hardware estop failed: {exc}")
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Hardware E-stop activation failed: {exc}",
+                ) from exc
             return JSONResponse(content=await build_state_dict())
 
         @app.delete("/robots/estop")
@@ -797,11 +1210,23 @@ class TeleopApp:
                 raise HTTPException(status_code=409, detail="Not in emergency stop")
             self._gui_estop = False
             await self._sync_effective_estop()
-            if self.robot and hasattr(self.robot, "estop"):
-                try:
-                    self.robot.estop.deactivate()
-                except Exception as exc:
-                    logger.error(f"Hardware estop clear failed: {exc}")
+            if self._cmd_estop:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Command input still requests E-stop; "
+                        "hardware E-stop remains active"
+                    ),
+                )
+            try:
+                await self._set_software_estop(False)
+            except Exception as exc:
+                self._gui_estop = True
+                await self._sync_effective_estop()
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Hardware E-stop clear failed: {exc}",
+                ) from exc
             return JSONResponse(content=await build_state_dict())
 
         # -- WebSocket endpoints --------------------------------------------
@@ -878,6 +1303,67 @@ class TeleopApp:
     # Teleop subprocess management
     # =========================================================================
 
+    def _require_doctor_exclusive(self) -> None:
+        if (
+            self.teleop_lifecycle != "stopped"
+            or self._teleop_running
+            or any(proc.poll() is None for proc in self._procs)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Doctor actions require Teleop to be fully stopped",
+            )
+        if self._doctor_lock.locked():
+            raise HTTPException(
+                status_code=409,
+                detail="Another Doctor action is already running",
+            )
+
+    async def _start_teleop_background(
+        self, user_env: Dict[str, str]
+    ) -> None:
+        try:
+            await asyncio.to_thread(self._start_teleop_procs, user_env)
+            self.teleop_lifecycle = "running"
+        except Exception as exc:
+            logger.exception(f"Teleop startup failed: {exc}")
+            self.teleop_lifecycle = "failed"
+            self._teleop_running = False
+            if self._procs:
+                await asyncio.to_thread(self._stop_teleop_procs)
+
+    async def _stop_teleop_background(self) -> None:
+        try:
+            await asyncio.to_thread(self._stop_teleop_procs)
+        except Exception as exc:
+            logger.exception(f"Teleop shutdown failed: {exc}")
+            self.teleop_lifecycle = "failed"
+            return
+
+        # Stopping is a terminal safety transition. Keep software E-Stop
+        # latched until the operator explicitly clears it.
+        self._gui_estop = True
+        self._cmd_estop = False
+        await state_manager.estop()
+        try:
+            await self._set_software_estop(True)
+        except Exception as exc:
+            logger.warning(f"Hardware E-Stop activation after stop failed: {exc}")
+        self.teleop_lifecycle = "stopped"
+
+    async def _set_software_estop(self, enabled: bool) -> None:
+        if (
+            self.robot is None
+            or not hasattr(self.robot, "estop")
+            or self._estop_control is None
+        ):
+            raise RuntimeError("E-stop control is not initialized")
+        await asyncio.to_thread(
+            self._estop_control.set_enabled,
+            enabled,
+            self.robot.estop,
+        )
+
     def _start_teleop_procs(self, user_env: Dict[str, str]):
         """Spawn all teleop subprocesses with the given env overrides."""
         if self._teleop_running:
@@ -892,7 +1378,7 @@ class TeleopApp:
 
         # --- Resolve ROBOT_CONFIG ---
         if not user_env.get("ROBOT_CONFIG"):
-            user_env["ROBOT_CONFIG"] = "vega_1p_gripper"
+            user_env["ROBOT_CONFIG"] = "vega_1u_gripper"
 
         # --- Resolve ZENOH_CONFIG ---
         zenoh_val = user_env.get("ZENOH_CONFIG", "").strip()
@@ -1008,7 +1494,7 @@ class TeleopApp:
         )
 
         # Publisher used by /record/start, /record/stop to drive the recorder
-        # subprocess (pedal mode, also listens on this topic).
+        # subprocess via the shared recorder_control topic.
         if self.record_mode and self._recorder_ctrl_pub is None:
             control_topic = self.config.get_topic("recorder_control")
             self._recorder_ctrl_pub = self._node.create_publisher(
@@ -1045,6 +1531,24 @@ class TeleopApp:
         """
         unlock_torso_args = ["--unlock-torso"] if self.unlock_torso else []
 
+        camera_cmds: List[List[str]] = []
+        wrist_cfg = (
+            (self.config.get("recorder", {}) or {}).get("wrist_camera_adapter", {})
+            or {}
+        )
+        wrist_requested = any(
+            self.record_components.get(f"{side}_wrist_rgb", False)
+            for side in ("left", "right")
+        )
+        if self.record_mode and wrist_requested and wrist_cfg.get("enabled", False):
+            camera_cmds.append([
+                sys.executable,
+                "-m",
+                "omniteleop.record.wrist_camera_adapter",
+                *ns_args,
+                *debug_args,
+            ])
+
         # vr_sim has no robot in the loop; everything else needs the follower.
         if self.leader_mode == "vr_sim":
             return [(
@@ -1077,19 +1581,25 @@ class TeleopApp:
                 *debug_args,
                 *lock_hand_args,
             ])
-        follower_cmds.append([
+        robot_controller_cmd = [
             sys.executable,
             str(src / "follower" / "robot_controller.py"),
             *ns_args,
             *debug_args,
-        ])
+            "--interpolation-method",
+            "none",
+            "--no-arm-filter",
+        ]
+        # Both leader stacks publish ready-to-send joint targets. Keep the
+        # follower's real-time path explicit and identical in exoskeleton and
+        # VR modes: no interpolation and no extra arm filtering.
+        follower_cmds.append(robot_controller_cmd)
 
         recorder_cmds: List[List[str]] = []
         if self.record_mode:
             # Pick the recorder module based on the user's format choice.
-            # Both inherit BaseRecorder, accept --record-mode pedal, listen
-            # on the recorder_control topic, and emit the same stdout
-            # markers that _tail_proc parses.
+            # Both inherit BaseRecorder, listen on the recorder_control topic,
+            # and emit the same stdout markers that _tail_proc parses.
             module = (
                 "omniteleop.record.mdp_recorder"
                 if self.recorder_format == "mdp"
@@ -1102,29 +1612,33 @@ class TeleopApp:
                 *ns_args,
                 *debug_args,
                 "--record-mode",
-                "pedal",
+                "joycon",
             ])
 
         # No leader scripts in rpi_mode — exo lives on a remote machine.
         if self.rpi_mode:
             logger.info("RPi mode: skipping leader scripts")
-            return [(c, 0.0) for c in follower_cmds + recorder_cmds]
+            return [(c, 0.0) for c in camera_cmds + follower_cmds + recorder_cmds]
 
         if self.leader_mode == "vr":
             # Follower first so robot_joints is publishing before
-            # paddle_leader's _bootstrap() starts polling. 0.5s lets
-            # robot_controller's Robot()/Zenoh init finish.
+            # paddle_leader's _bootstrap() starts polling. Robot()/Zenoh
+            # initialization can take ~10s and concurrent Robot() queries can
+            # time out, so start the VR leader and recorder serially.
+            rate_args = ["--publish-rate", "40"]
             leader_cmd = [
                 sys.executable,
                 str(src / "leader" / "paddle_leader.py"),
                 *ns_args,
                 *debug_args,
                 *unlock_torso_args,
+                *rate_args,
             ]
             entries: List[Tuple[List[str], float]] = []
+            entries.extend((c, 0.0) for c in camera_cmds)
             entries.extend((c, 0.0) for c in follower_cmds)
-            entries.append((leader_cmd, 0.5))
-            entries.extend((c, 0.0) for c in recorder_cmds)
+            entries.append((leader_cmd, 12.0))
+            entries.extend((c, 30.0) for c in recorder_cmds)
             return entries
 
         # exoskeleton (default)
@@ -1142,26 +1656,65 @@ class TeleopApp:
                 *debug_args,
             ],
         ]
-        return [(c, 0.0) for c in leader_cmds + follower_cmds + recorder_cmds]
+        return [
+            (c, 0.0)
+            for c in camera_cmds + leader_cmds + follower_cmds + recorder_cmds
+        ]
+
+    def _is_process_running(self, name: str) -> bool:
+        return any(
+            proc_name == name and proc.poll() is None
+            for proc, proc_name in zip(self._procs, self._proc_names)
+        )
 
     def _stop_teleop_procs(self):
-        """Terminate all teleop subprocesses and their entire process groups."""
+        """Terminate all teleop subprocesses and their entire process groups.
+
+        robot_controller is stopped last and given a longer grace period: it is
+        the only process holding the arms, and on SIGTERM it runs a safe-park
+        sequence (hold measured pose, then engage brakes) before exiting. Killing
+        it first, or killing it early, abandons the arms in position mode and
+        lets the wrist fall past its joint limit.
+        """
         import signal
 
-        for proc in self._procs:
+        processes = list(zip(self._procs, self._proc_names))
+        others = [pair for pair in processes if pair[1] != self.ARM_HOLDER_PROC]
+        arm_holders = [pair for pair in processes if pair[1] == self.ARM_HOLDER_PROC]
+
+        def _signal(proc, sig) -> None:
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                os.killpg(os.getpgid(proc.pid), sig)
             except (ProcessLookupError, OSError):
                 pass  # already dead
-        # Wait then force-kill any stragglers
-        for proc in self._procs:
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
+
+        def _stop_group(group, grace: float, *, warn_for_arm: bool = False) -> None:
+            for proc, _name in group:
+                _signal(proc, signal.SIGTERM)
+            deadline = time.monotonic() + grace
+            stragglers = []
+            for proc, name in group:
                 try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except (ProcessLookupError, OSError):
-                    pass
+                    proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    stragglers.append((proc, name))
+            for proc, name in stragglers:
+                if warn_for_arm:
+                    logger.warning(
+                        f"{name} did not exit within {grace}s — the arms may "
+                        f"not have been parked; verify joint limits before the "
+                        f"next session"
+                    )
+                _signal(proc, signal.SIGKILL)
+
+        # Stop command producers first. robot_controller keeps publishing its
+        # last target until it receives SIGTERM, then performs the brake handoff.
+        _stop_group(others, self.PROC_STOP_GRACE_S)
+        _stop_group(
+            arm_holders,
+            self.ARM_HOLDER_STOP_GRACE_S,
+            warn_for_arm=True,
+        )
         self._procs.clear()
         self._proc_names.clear()
         self._state_checker_running = False
@@ -1174,6 +1727,7 @@ class TeleopApp:
         # Reset recording mirror state — subprocess is gone.
         self.is_recording = False
         self.recording_status = "idle"
+        self.recorder_ready = False
         self.episode_dir_name = None
         self._recorder_ctrl_pub = None
         # Reset align latch so the next teleop session runs the alignment
@@ -1216,6 +1770,7 @@ class TeleopApp:
             pass
         finally:
             if is_recorder:
+                self.recorder_ready = False
                 # Subprocess has exited (clean or crash). If we still think
                 # we're recording, flip state so the UI doesn't get stuck.
                 rc = proc.poll()
@@ -1234,6 +1789,8 @@ class TeleopApp:
                     self.recording_status = (
                         "stopped" if rc == 0 else "crashed"
                     )
+                elif rc not in (None, 0):
+                    self.recording_status = "crashed"
 
     def _observe_recorder_line(self, line: str):
         """Update recording_status + episode_dir_name from recorder stdout.
@@ -1246,7 +1803,10 @@ class TeleopApp:
         followed by a "📁 Directory: <name>" line.
         """
         # Keyword-based detection (avoids depending on emoji code points).
-        if "RECORDING STARTED" in line:
+        if "RECORDER READY" in line:
+            self.recorder_ready = True
+            self.recording_status = "ready"
+        elif "RECORDING STARTED" in line:
             self.is_recording = True
             self.recording_status = "recording"
             self.episode_dir_name = None  # will be set by the next Directory: line
@@ -1286,7 +1846,8 @@ class TeleopApp:
                 and "right_wrist_camera" in robot_configs.sensors
             ):
                 robot_configs.sensors["right_wrist_camera"].enabled = True
-            self.robot = Robot(configs=robot_configs)
+            self.robot = ReadOnlyRobot(configs=robot_configs)
+            self._estop_control = SoftwareEStopControl(self.robot.robot_info)
 
             if self.save_images:
                 if self.robot.sensors.head_camera.wait_for_active(timeout=5.0):
@@ -1297,6 +1858,17 @@ class TeleopApp:
             logger.success("Robot interface ready")
         except Exception as exc:
             logger.error(f"Robot init failed: {exc}")
+            if self._estop_control is not None:
+                try:
+                    self._estop_control.shutdown()
+                except Exception:
+                    pass
+                self._estop_control = None
+            if self.robot is not None:
+                try:
+                    self.robot.shutdown()
+                except Exception:
+                    pass
             self.robot = None
 
         if self.state_checker:
@@ -1313,6 +1885,8 @@ class TeleopApp:
                     camera_map = {
                         "camera_1": ("head_camera", "left_rgb"),
                         "camera_2": ("head_camera", "right_rgb"),
+                        "left_wrist": ("left_wrist_camera", None),
+                        "right_wrist": ("right_wrist_camera", None),
                     }
                     if camera_id not in camera_map:
                         return b""
@@ -1337,7 +1911,14 @@ class TeleopApp:
                         img = cv2.resize(img, self.image_resolution)
                     if len(img.shape) == 3 and img.shape[2] == 3:
                         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                    _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    jpeg_quality = (
+                        65
+                        if camera_id in {"left_wrist", "right_wrist"}
+                        else 85
+                    )
+                    _, buf = cv2.imencode(
+                        ".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]
+                    )
                     return buf.tobytes()
                 except Exception:
                     return b""
@@ -1367,6 +1948,11 @@ class TeleopApp:
                 logger.error(f"StateChecker loop error: {exc}")
                 with self._robot_state_lock:
                     self.robot_state = "ERROR"
+            # Avoid a tight loop that would re-run dextop topic list (and
+            # create a fresh Zenoh session) immediately after the previous
+            # call returns. Zenoh discovery is expensive; 2 s between ticks
+            # is plenty for state transitions to propagate.
+            time.sleep(2.0)
 
     # =========================================================================
     # Robot state observation helpers
@@ -1474,6 +2060,9 @@ class TeleopApp:
         self._stop_teleop_procs()
         if self.robot:
             self.robot.shutdown()
+        if self._estop_control:
+            self._estop_control.shutdown()
+            self._estop_control = None
         if hasattr(self._node, "shutdown"):
             self._node.shutdown()
 
@@ -1523,6 +2112,15 @@ def main(
             embodiments (e.g. vega_1u). Default off so the same launch works
             across full and upper-body Vegas.
     """
+    os.environ.setdefault("ROBOT_CONFIG", "vega_1u_gripper")
+    if not os.environ.get("ZENOH_CONFIG"):
+        zenoh_base = Path.home() / ".dexmate" / "comm" / "zenoh"
+        try:
+            detected_zenoh = _autodetect_zenoh_cert(zenoh_base)
+        except FileNotFoundError:
+            detected_zenoh = None
+        if detected_zenoh:
+            os.environ["ZENOH_CONFIG"] = str(detected_zenoh)
     setup_logging(debug)
     logger.info("OmniTeleop App Backend starting" + (" [rpi-mode]" if rpi_mode else ""))
 

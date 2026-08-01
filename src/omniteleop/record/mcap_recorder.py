@@ -23,16 +23,13 @@ from __future__ import annotations
 import random
 import shutil
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-import numpy as np
 import tyro
 from loguru import logger
 
-from dexcontrol.robot import Robot
 from dexcontrol.core.config import get_robot_config
 
 from dexdata.handlers.containers import CompressedVideoSpec, DepthImageSpec
@@ -53,6 +50,7 @@ from dexdata.metadata import (
 )
 from dexdata.spec import Spec, load_spec, restrict
 from omniteleop.common.logging import setup_logging
+from omniteleop.read_only_robot import ReadOnlyRobot
 from omniteleop.record.base_recorder import BaseRecorder
 from omniteleop.record.component_map import resolve_topics
 from omniteleop.record.sensors import (
@@ -77,7 +75,7 @@ class MCAPRecorder(BaseRecorder):
             namespace=namespace, debug=debug,
             record_mode=record_mode, show_rerun=show_rerun,
         )
-        self.robot: Optional[Robot] = None
+        self.robot: Optional[ReadOnlyRobot] = None
         self._writer: Optional[Writer] = None
         self._spec: Optional[Spec] = None
         self._episode_metadata: Optional[EpisodeMetadata] = None
@@ -87,6 +85,11 @@ class MCAPRecorder(BaseRecorder):
         depth_cfg = recorder_cfg.get("depth", {}) or {}
         self._depth_min_range = float(depth_cfg.get("min_range", 0.1))
         self._depth_max_range = float(depth_cfg.get("max_range", 8.0))
+        wrist_cfg = recorder_cfg.get("wrist_camera_adapter", {}) or {}
+        self._wrist_startup_timeout_s = float(wrist_cfg.get("startup_timeout_s", 5.0))
+        self._wrist_stale_timeout_s = float(
+            wrist_cfg.get("stale_frame_timeout_s", 0.25)
+        )
         # image_resolution is (width, height); cv2.resize takes (w, h).
         self._video_width, self._video_height = self.image_resolution
 
@@ -112,13 +115,16 @@ class MCAPRecorder(BaseRecorder):
 
         # 2) Build sensor descriptors, then flip dexcontrol's per-sensor
         #    `enabled` flags for every sensor producing a wanted topic.
-        self._state_sensors = state_sensors(self.image_resolution)
+        self._state_sensors = state_sensors(
+            self.image_resolution,
+            wrist_stale_timeout_s=self._wrist_stale_timeout_s,
+        )
         robot_configs = get_robot_config()
         for sensor in self._state_sensors:
             if sensor.topics & wanted_topics:
                 sensor.enable_in_config(robot_configs)
 
-        self.robot = Robot(configs=robot_configs)
+        self.robot = ReadOnlyRobot(configs=robot_configs)
 
         # 3) Drop topics whose hardware is missing on this specific robot.
         missing: set[str] = set()
@@ -149,6 +155,22 @@ class MCAPRecorder(BaseRecorder):
                 logger.info("Camera streams active")
             else:
                 logger.warning("Some camera streams may not be active")
+
+        for side in ("left", "right"):
+            component = f"{side}_wrist_rgb"
+            if not self.record_components.get(component, False):
+                continue
+            camera = getattr(self.robot.sensors, f"{side}_wrist_camera")
+            logger.info(f"Waiting for {side} wrist camera stream...")
+            if not camera.wait_for_active(timeout=self._wrist_startup_timeout_s):
+                raise RuntimeError(
+                    f"{side} wrist camera produced no frame within "
+                    f"{self._wrist_startup_timeout_s:.1f}s"
+                )
+            value = camera.get_obs(include_timestamp=True)
+            if not isinstance(value, dict) or not value.get("timestamp_ns"):
+                raise RuntimeError(f"{side} wrist camera returned no source timestamp")
+            logger.info(f"{side.capitalize()} wrist camera stream active")
 
     # ─── Storage hooks ─────────────────────────────────────────────────────
 
@@ -309,6 +331,7 @@ def main(
     )
     try:
         recorder.initialize()
+        log.info("RECORDER READY")
         recorder.run()
     except Exception as e:
         log.error(f"Recorder error: {e}")

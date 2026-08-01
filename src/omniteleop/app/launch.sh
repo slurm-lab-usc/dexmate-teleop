@@ -58,7 +58,7 @@ trap cleanup EXIT INT TERM
 #   vr_sim      → paddle_leader
 # Plus the recorder subprocesses (mcap_recorder, mdp_recorder), which run as
 # `python -m omniteleop.record.<module>` so we match the module path too.
-STALE_PATTERN="joycon_reader\.py|arm_reader\.py|robot_controller\.py|command_processor\.py|paddle_leader\.py|omniteleop\.record\.(mcap|mdp)_recorder"
+STALE_PATTERN="joycon_reader\.py|arm_reader\.py|robot_controller\.py|command_processor\.py|paddle_leader\.py|omniteleop\.record\.(mcap|mdp)_recorder|omniteleop\.record\.wrist_camera_adapter"
 STALE_PIDS=$(pgrep -f "$STALE_PATTERN" || true)
 if [[ -n "$STALE_PIDS" ]]; then
   echo "→ Killing stale teleop processes: $STALE_PIDS"
@@ -79,6 +79,7 @@ fi
 # ── Backend ───────────────────────────────────────────────────────────────────
 echo "→ Starting backend${RPI_FLAG:+ (rpi-mode)}..."
 cd "$REPO_ROOT"
+export ROBOT_CONFIG="${ROBOT_CONFIG:-vega_1u_gripper}"
 python -m omniteleop.app.backend.app_backend $RPI_FLAG $LOCK_HAND_FLAG $UNLOCK_TORSO_FLAG &
 BACKEND_PID=$!
 

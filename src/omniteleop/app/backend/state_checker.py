@@ -10,9 +10,6 @@ import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
-from loguru import logger
-
-
 class StateChecker:
     """Determines robot control state via a priority-based logic tree.
 
@@ -31,6 +28,8 @@ class StateChecker:
 
     # Threshold (radians) for exo-vs-robot proximity check in ALIGN state.
     ESTOP_ALIGN_THRESHOLD: float = 0.75
+    REQUIRED_TOPICS_GRACE_SEC: float = 20.0
+    JOYCON_DATA_TIMEOUT_SEC: float = 2.0
 
     # Threshold (radians) between exo and config init_pos. Must stay in sync
     # with CommandProcessor._align_threshold — CommandProcessor gates motion
@@ -110,12 +109,16 @@ class StateChecker:
         # Exo joints subscriber state.
         self._node = None
         self._exo_subscriber = None
+        self._joycon_subscriber = None
+        self._estop_subscriber = None
         self._exo_data: Dict[str, Optional[dict]] = {"data": None}
         self._exo_data_event = threading.Event()
+        self._last_joycon_data_at: float = 0.0
+        self._latest_estop_state: dict = {}
 
         # Component query interface and robot instance.
-        self._bot = None
         self._query_interface = None
+        self._component_errors_cache: dict = {}
 
         # Latest robot joint positions, updated externally via update_robot_joints().
         self._robot_left_joints: List[float] = []
@@ -148,6 +151,7 @@ class StateChecker:
         # Cached `dextop topic list` output. Refreshed by each get_state() call
         # so get_sensor_topics_status() can reuse it without shelling out again.
         self._last_topic_list: Optional[str] = None
+        self._last_required_topics_ok_at: float = 0.0
 
         # Once motion has started for the first time (operator pressed then
         # released estop after initial alignment), ALIGN is bypassed forever
@@ -161,14 +165,21 @@ class StateChecker:
     # -------------------------------------------------------------------------
 
     def _init_exo_subscriber(self) -> None:
-        """Initializes the reusable exo joints Zenoh subscriber."""
+        """Initializes reusable exoskeleton and Joy-Con Zenoh subscribers."""
         try:
             from dexcomm import Node
-            from dexcomm.codecs import DictDataCodec
+            from dexcomm.codecs import DictDataCodec, EStopStateCodec
+            from dexbot_utils import RobotInfo
 
             def on_exo_joints(data: dict) -> None:
                 self._exo_data["data"] = data
                 self._exo_data_event.set()
+
+            def on_joycon(data: dict) -> None:
+                # A fresh message is the most direct indication that the same
+                # evdev-based Joy-Con path used by teleoperation is healthy.
+                if isinstance(data, dict) and data:
+                    self._last_joycon_data_at = time.monotonic()
 
             self._node = Node(
                 name="state_checker_exo_reader",
@@ -179,20 +190,32 @@ class StateChecker:
                 callback=on_exo_joints,
                 decoder=DictDataCodec.decode,
             )
+            self._joycon_subscriber = self._node.create_subscriber(
+                "exo/joycon",
+                callback=on_joycon,
+                decoder=DictDataCodec.decode,
+            )
+            robot_info = RobotInfo()
+            estop_config = robot_info.get_component_config("estop")
+            self._estop_subscriber = self._node.create_subscriber(
+                estop_config.state_sub_topic,
+                callback=lambda data: setattr(
+                    self, "_latest_estop_state", dict(data)
+                ),
+                decoder=EStopStateCodec.decode,
+            )
         except Exception:
             self._node = None
             self._exo_subscriber = None
+            self._joycon_subscriber = None
 
     def _init_query_interface(self) -> None:
         """Initializes the reusable robot query interface."""
         try:
             from dexcontrol.core.robot_query_interface import RobotQueryInterface
-            from dexcontrol.robot import Robot
 
-            self._bot = Robot()
             self._query_interface = RobotQueryInterface.create()
         except Exception:
-            self._bot = None
             self._query_interface = None
 
     def cleanup(self) -> None:
@@ -233,10 +256,14 @@ class StateChecker:
         """
         topic_list = self._get_topic_list()
         self._last_topic_list = topic_list
-        if topic_list is None or not self._check_required_topics(topic_list):
+        topics_ok = topic_list is not None and self._check_required_topics(topic_list)
+        now = time.time()
+        if topics_ok:
+            self._last_required_topics_ok_at = now
+        elif now - self._last_required_topics_ok_at > self.REQUIRED_TOPICS_GRACE_SEC:
             return "BOOT"
 
-        if not self._check_active_conditions(topic_list):
+        if not self._check_active_conditions(topic_list or ""):
             return "DIAGNOSIS"
 
         # ALIGN compares the worn exoskeleton against the robot's init_pos —
@@ -251,6 +278,16 @@ class StateChecker:
     # BOOT — Topic availability
     # -------------------------------------------------------------------------
 
+    # Zenoh key discovery timeout for dextop topic list. The robot's relay
+    # can take 10–20 s to respond with all state topics (arm, gripper, …)
+    # over a custom multicast address; the dextop default of 3.0 s only
+    # catches the fastest-responding publishers (head cameras). Bump it
+    # high enough that discovery reliably returns the full set, and add
+    # retries so a transient multicast drop doesn't force a BOOT→DIAGNOSIS
+    # fail on the next StateChecker tick.
+    _TOPIC_LIST_DISCOVERY_TIMEOUT_S: float = 20.0
+    _TOPIC_LIST_RETRIES: int = 2
+
     def _get_topic_list(self) -> Optional[str]:
         """Retrieves the list of active topics from dextop.
 
@@ -258,11 +295,25 @@ class StateChecker:
             Topic list string, or None if the command fails.
         """
         try:
+            cmd = [
+                "dextop",
+                "topic",
+                "list",
+                "--timeout",
+                str(self._TOPIC_LIST_DISCOVERY_TIMEOUT_S),
+                "--retries",
+                str(self._TOPIC_LIST_RETRIES),
+            ]
+            # Explicitly pass the Zenoh config when available so dextop
+            # doesn't have to fall back to slow multicast scouting.
+            zenoh_config = os.environ.get("ZENOH_CONFIG", "")
+            if zenoh_config:
+                cmd.extend(["--config", zenoh_config])
             result = subprocess.run(
-                ["dextop", "topic", "list"],
+                cmd,
                 capture_output=True,
                 text=True,
-                timeout=10.0,
+                timeout=self._TOPIC_LIST_DISCOVERY_TIMEOUT_S + 10.0,
             )
             return result.stdout if result.stdout else None
         except Exception:
@@ -274,7 +325,11 @@ class StateChecker:
         Branches on ``self.leader_mode``:
           - ``vr_sim``: no required topics — BOOT is trivially satisfied.
             Process checks still apply in DIAGNOSIS.
-          - ``exoskeleton`` / ``vr``: full robot-side requirements (arm state,
+          - ``vr``: head cameras only. Robot readiness is checked in
+            DIAGNOSIS via the follower/leader processes and component health;
+            robot state topics can be transient while the VR stack owns the
+            direct Robot() connections.
+          - ``exoskeleton``: full robot-side requirements (arm state,
             heartbeat, head cameras).
 
         Returns:
@@ -282,6 +337,11 @@ class StateChecker:
         """
         if self.leader_mode == "vr_sim":
             return []
+        if self.leader_mode == "vr":
+            return [
+                f"{self.robot_name}/sensors/head_camera/left_rgb",
+                f"{self.robot_name}/sensors/head_camera/right_rgb",
+            ]
         suffixes = list(self.REQUIRED_TOPIC_SUFFIXES)
         return [f"{self.robot_name}/{s}" for s in suffixes]
 
@@ -305,7 +365,7 @@ class StateChecker:
                 found:   List of topic names that are active.
         """
         required = self._build_required_topics()
-        topic_list = self._get_topic_list()
+        topic_list = self._last_topic_list
 
         if topic_list is None:
             return {"missing": required, "found": []}
@@ -407,22 +467,17 @@ class StateChecker:
         return all(self._diagnosis_details.values())
 
     def _check_joycons_connected(self) -> bool:
-        """Checks if both JoyCon controllers are connected via Bluetooth.
+        """Checks whether the teleoperation Joy-Con stream is live.
 
         Returns:
-            True if both Joy-Con (L) and Joy-Con (R) are connected.
+            True if a decoded ``exo/joycon`` message arrived recently.
         """
-        try:
-            result = subprocess.run(
-                ["bluetoothctl", "devices", "Connected"],
-                capture_output=True,
-                text=True,
-                timeout=5.0,
-            )
-            output = result.stdout
-            return "Joy-Con (L)" in output and "Joy-Con (R)" in output
-        except Exception:
+        if self._last_joycon_data_at <= 0.0:
             return False
+        return (
+            time.monotonic() - self._last_joycon_data_at
+            <= self.JOYCON_DATA_TIMEOUT_SEC
+        )
 
     def _required_processes(self) -> List[str]:
         """Process names that must be running for DIAGNOSIS to pass.
@@ -502,6 +557,7 @@ class StateChecker:
 
         try:
             status = self._query_interface.get_component_status(show=False)
+            errors: dict = {}
             for component_status in status.get("states", {}).values():
                 if not isinstance(component_status, dict):
                     continue
@@ -509,14 +565,18 @@ class StateChecker:
                 error = component_status.get("error")
                 if isinstance(error, dict):
                     if error.get("error_code", 0) != 0:
+                        self._component_errors_cache = status.get("states", {})
                         return True
                     if error.get("error_message", ""):
+                        self._component_errors_cache = status.get("states", {})
                         return True
 
                 operation = component_status.get("operation")
                 if operation is not None and operation == 0:
+                    self._component_errors_cache = status.get("states", {})
                     return True
 
+            self._component_errors_cache = errors
             return False
         except Exception:
             return False
@@ -550,56 +610,31 @@ class StateChecker:
             # errors = {"left_arm": {"error_code": 5, "operation": 0}}
             # estop_on = True
         """
-        if not self._query_interface:
-            return {}, False
-
         errors: dict = {}
-        estop_status = False
-
-        try:
-            status = self._query_interface.get_component_status(show=False)
-            for component_name, component_status in status.get("states", {}).items():
-                if not isinstance(component_status, dict):
-                    continue
-
-                component_errors: dict = {}
-                has_error = False
-
-                error = component_status.get("error")
-                if isinstance(error, dict):
-                    error_code = error.get("error_code", 0)
-                    error_message = error.get("error_message", "")
-                    if error_code != 0 or error_message:
-                        component_errors["error_code"] = error_code
-                        component_errors["error_message"] = error_message
-                        has_error = True
-
-                operation = component_status.get("operation")
-                if operation is not None:
-                    component_errors["operation"] = operation
-                    if operation == 0:
-                        has_error = True
-                        component_errors.setdefault(
-                            "error_message",
-                            "Component operation status is 0 (error)",
-                        )
-
-                if has_error:
-                    errors[component_name] = component_errors
-
-            if self._bot:
-                estop_status = self._bot.estop._get_state().get(
-                    "software_estop_enabled", False
+        for component_name, component_status in self._component_errors_cache.items():
+            if not isinstance(component_status, dict):
+                continue
+            error = component_status.get("error")
+            operation = component_status.get("operation")
+            if (
+                isinstance(error, dict)
+                and (
+                    error.get("error_code", 0) != 0
+                    or bool(error.get("error_message"))
                 )
-
-        except Exception as e:
-            return {
-                "_query_error": {
-                    "error_message": f"Failed to query component status: {e}"
+            ) or operation == 0:
+                errors[component_name] = {
+                    "error_code": error.get("error_code", 0)
+                    if isinstance(error, dict)
+                    else 0,
+                    "error_message": error.get("error_message", "")
+                    if isinstance(error, dict)
+                    else "Component operation status is 0 (error)",
+                    "operation": operation,
                 }
-            }, False
-
-        return errors, estop_status
+        return errors, bool(
+            self._latest_estop_state.get("software_estop_enabled", False)
+        )
 
     # -------------------------------------------------------------------------
     # ALIGN — Exo joint limits
@@ -622,7 +657,7 @@ class StateChecker:
         if self._motion_started_latch:
             return True
 
-        joint_angles = self._get_exo_joint_angles()
+        joint_angles = self.get_latest_exo_joints()
         if joint_angles is None:
             return False
 
@@ -735,7 +770,9 @@ class StateChecker:
                 left_arm:  List of out-of-limit joint descriptions (if any).
                 right_arm: List of out-of-limit joint descriptions (if any).
         """
-        joint_angles = self._get_exo_joint_angles()
+        # UI state generation must never wait for a fresh sample. The
+        # subscriber callback continuously refreshes this cache.
+        joint_angles = self.get_latest_exo_joints()
 
         if joint_angles is None:
             return {"message": "Cannot read exoskeleton joint angles"}

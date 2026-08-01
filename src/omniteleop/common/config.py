@@ -25,12 +25,12 @@ class RobotConfig(dict):
         Args:
             config_path: Optional path to config file.
                         If None, checks ROBOT_CONFIG env var to select config,
-                        then defaults to vega_1_f5d6.yaml
+                        then defaults to vega_1u_gripper.yaml
         """
         # Determine config path
         if config_path is None:
             # Check ROBOT_CONFIG environment variable to select config file
-            robot_config = os.environ.get("ROBOT_CONFIG", "vega_1_f5d6")
+            robot_config = os.environ.get("ROBOT_CONFIG", "vega_1u_gripper")
             config_filename = f"{robot_config}.yaml"
             config_path = LIB_PATH / "configs" / config_filename
 
@@ -171,8 +171,8 @@ def get_config(config_path: Optional[Path] = None) -> RobotConfig:
 
     Priority order for config file:
     1. Explicitly passed config_path (reloads if different)
-    2. ROBOT_CONFIG environment variable (e.g., "vega_1_f5d6" -> vega_1_f5d6.yaml)
-    3. Default: vega_1_f5d6.yaml
+    2. ROBOT_CONFIG environment variable (e.g., "vega_1u_gripper" -> vega_1u_gripper.yaml)
+    3. Default: vega_1u_gripper.yaml
 
     Args:
         config_path: Optional path to config file (forces reload if provided)

@@ -30,10 +30,37 @@ omni-joycon    # JoyCon controller reader
 omni-cmd       # Command processor with safety
 omni-robot     # Robot controller
 omni-recorder  # MDP recorder for policy learning
+omni-mcap-recorder # MCAP recorder for policy learning
+omni-wrist-cameras # Local UVC wrist cameras → standard Zenoh camera topics
 omni-telemetry # Telemetry viewer
 omni-paddle    # VR reader
 
 app/launch.sh  # One command that replaces all
+```
+
+### JoyCon Gripper Controls
+
+For gripper robot configurations such as `vega_1u_gripper`:
+
+- Left/right stick up and down: proportional fine open/close for that gripper.
+- Left D-pad Up/Down: fully open/close the left gripper.
+- Right X/B: fully open/close the right gripper.
+- Hold L+R for `recording_hold_duration`, then release both: toggle recording.
+- L and R have no individual gripper action.
+
+After E-stop, another control mode, or the L+R recording gesture, each gripper
+stick must return to center once before fine control resumes.
+
+### Local UVC Wrist Cameras
+
+When `recorder.wrist_camera_adapter.enabled` and either wrist RGB component are
+enabled in the active robot YAML, the app starts the adapter automatically in
+record mode. It publishes `/dev/dexmate-wrist-left` and
+`/dev/dexmate-wrist-right` on the standard Dexmate wrist-camera topics. For a
+standalone stream check, run:
+
+```shell
+omni-wrist-cameras
 ```
 
 ## 📄 Licensing
@@ -57,4 +84,3 @@ For businesses that want to use this software in proprietary applications withou
     <a href="mailto:contact@dexmate.ai">📧 Contact Us</a>
   </p>
 </div>
-
