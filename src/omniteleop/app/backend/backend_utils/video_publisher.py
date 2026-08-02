@@ -63,11 +63,18 @@ class VideoPublisher:
     async def publish_frame(self, camera_id: str) -> None:
         """Fetch/encode one frame once, then fan it out to all viewers."""
         callback = self._get_frame_callback
-        frame = (
-            await asyncio.to_thread(callback, camera_id)
-            if callback is not None
-            else b""
-        )
+        if callback is None:
+            return
+        try:
+            # A camera that hangs (e.g. USB unplugged) must not stall the
+            # producer task forever — time out and skip this tick so the
+            # loop can retry on the next frame interval.
+            frame = await asyncio.wait_for(
+                asyncio.to_thread(callback, camera_id),
+                timeout=3.0,
+            )
+        except Exception:
+            return
         if not frame:
             return
 

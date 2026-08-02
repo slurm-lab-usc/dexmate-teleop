@@ -36,12 +36,12 @@ from omniteleop.common.trajectory_safety import limit_sampled_joint_speed
 class ArmSafeInitializer:
     """Initializes robot arms to safe positions while avoiding self-collisions."""
 
-    TRACKING_TOLERANCE_RAD = 0.05
+    TRACKING_TOLERANCE_RAD = 0.10  # 5.7° — heavy arms need slack during slow homing
     TRACKING_REFERENCE_DELAY_SECONDS = 0.12
     TRACKING_VIOLATION_DURATION_SECONDS = 0.20
     FINAL_REACH_TIMEOUT_SECONDS = 2.0
     HOMING_MAX_JOINT_SPEED_RAD_S = 0.35
-    WAYPOINT_CATCHUP_TIMEOUT_SECONDS = 2.0
+    WAYPOINT_CATCHUP_TIMEOUT_SECONDS = 5.0  # 2s was too tight with 0.35 rad/s speed cap
 
     def __init__(
         self,

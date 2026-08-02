@@ -151,7 +151,12 @@ class StateChecker:
         # Cached `dextop topic list` output. Refreshed by each get_state() call
         # so get_sensor_topics_status() can reuse it without shelling out again.
         self._last_topic_list: Optional[str] = None
+        self._last_topic_list_at: float = 0.0
         self._last_required_topics_ok_at: float = 0.0
+        # Background topic-list fetch so the 20 s discovery timeout never
+        # blocks the StateChecker tick thread.
+        self._topic_fetch_lock = threading.Lock()
+        self._topic_fetch_pending = False
 
         # Once motion has started for the first time (operator pressed then
         # released estop after initial alignment), ALIGN is bypassed forever
@@ -254,10 +259,25 @@ class StateChecker:
         Returns:
             One of: ``"BOOT"``, ``"DIAGNOSIS"``, ``"ALIGN"``, ``"ACTIVE"``.
         """
-        topic_list = self._get_topic_list()
-        self._last_topic_list = topic_list
-        topics_ok = topic_list is not None and self._check_required_topics(topic_list)
         now = time.time()
+        # Refresh the topic list in a background thread so the 20 s
+        # discovery timeout never blocks the StateChecker tick. While a
+        # fetch is in-flight, keep using the last known list (or None).
+        needs_refresh = (
+            self._last_topic_list is None
+            or now - self._last_topic_list_at > self._TOPIC_LIST_REFRESH_INTERVAL_S
+        )
+        if needs_refresh and not self._topic_fetch_pending:
+            with self._topic_fetch_lock:
+                if not self._topic_fetch_pending:
+                    self._topic_fetch_pending = True
+                    threading.Thread(
+                        target=self._fetch_topic_list_background,
+                        daemon=True,
+                        name="StateCheckerTopicFetch",
+                    ).start()
+        topic_list = self._last_topic_list
+        topics_ok = topic_list is not None and self._check_required_topics(topic_list)
         if topics_ok:
             self._last_required_topics_ok_at = now
         elif now - self._last_required_topics_ok_at > self.REQUIRED_TOPICS_GRACE_SEC:
@@ -278,15 +298,21 @@ class StateChecker:
     # BOOT — Topic availability
     # -------------------------------------------------------------------------
 
-    # Zenoh key discovery timeout for dextop topic list. The robot's relay
-    # can take 10–20 s to respond with all state topics (arm, gripper, …)
-    # over a custom multicast address; the dextop default of 3.0 s only
-    # catches the fastest-responding publishers (head cameras). Bump it
-    # high enough that discovery reliably returns the full set, and add
-    # retries so a transient multicast drop doesn't force a BOOT→DIAGNOSIS
-    # fail on the next StateChecker tick.
     _TOPIC_LIST_DISCOVERY_TIMEOUT_S: float = 20.0
     _TOPIC_LIST_RETRIES: int = 2
+    _TOPIC_LIST_REFRESH_INTERVAL_S: float = 12.0
+
+    def _fetch_topic_list_background(self) -> None:
+        """Run dextop topic list in a daemon thread so the tick is never blocked."""
+        try:
+            result = self._get_topic_list()
+            now = time.time()
+            self._last_topic_list = result
+            self._last_topic_list_at = now
+        except Exception:
+            pass
+        finally:
+            self._topic_fetch_pending = False
 
     def _get_topic_list(self) -> Optional[str]:
         """Retrieves the list of active topics from dextop.

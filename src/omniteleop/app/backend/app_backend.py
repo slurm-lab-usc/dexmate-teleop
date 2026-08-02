@@ -144,7 +144,9 @@ def _require_arm_brakes_engaged(report: Dict[str, Any]) -> None:
         if arm_status.get("enabled")
     ]
     if released:
-        raise RuntimeError(
+        # Precondition violation → ValueError so handlers map it to 409,
+        # not a server-side 500.
+        raise ValueError(
             "Brake release is active; disable all brake release before movement ("
             + "; ".join(released)
             + ")"
@@ -335,6 +337,10 @@ class TeleopApp:
         # ---- subprocess handles --------------------------------------------
         self._procs: List[subprocess.Popen] = []
         self._proc_names: List[str] = []  # parallel name list for each proc
+        # name -> returncode of subprocesses that exited unexpectedly while the
+        # stack was running (populated by _tail_proc, surfaced via error_state).
+        self._proc_crashed: Dict[str, int] = {}
+        self._stop_in_progress = False  # True while _stop_teleop_procs runs
         self._teleop_running = False  # True once start_teleop() succeeds
         self.teleop_lifecycle = "stopped"
         self._lifecycle_task: Optional[asyncio.Task] = None
@@ -443,16 +449,34 @@ class TeleopApp:
                 robot_state = self.robot_state
 
             # Compute unified control_state.
-            # ALIGN wins over PAUSE so the UI shows "Aligning" during the
-            # initial alignment phase even though CommandProcessor has
-            # forced emergency_stop=True (which otherwise drives cmd_estop
-            # → PAUSE). Once exo passes the init_pos check, StateChecker
-            # latches and stops returning ALIGN; any subsequent estop is
-            # shown as PAUSE normally.
+            # StateChecker returns the raw robot state (BOOT/DIAGNOSIS/ALIGN/ACTIVE).
+            # The backend maps this to a control_state that the frontend displays.
+            #
+            # Core transitions:
+            #   BOOT → DIAGNOSIS → ALIGN → (alignment done) → PAUSED → ACTIVE
+            #
+            # During ALIGN, CommandProcessor forces emergency_stop=True — but we
+            # still show ALIGN (not PAUSE) so the user knows they need to match
+            # the robot's pose. Once StateChecker says ACTIVE (alignment done),
+            # CommandProcessor STILL forces emergency_stop=True until the user
+            # explicitly cycles estop. At that point we show PAUSED — alignment
+            # work is done, the user just needs to release estop to start motion.
             if robot_state == "ALIGN":
-                control_state = "ALIGN"
+                control_state = (
+                    "ALIGN"
+                    if not self._motion_started_signaled
+                    else ("PAUSE" if is_estop else "ACTIVE")
+                )
+            elif robot_state == "ACTIVE" and not self._motion_started_signaled:
+                # First time ACTIVE — StateChecker confirmed alignment passed.
+                # CommandProcessor still has emergency_stop=True (post-align
+                # fresh-engagement gate), so the effective estop IS on. Show
+                # PAUSED, not ALIGN — the aligning work is done.
+                control_state = "PAUSE" if is_estop else "ACTIVE"
             elif is_estop:
-                control_state = "PAUSE"
+                control_state = (
+                    "ALIGN" if not self._motion_started_signaled else "PAUSE"
+                )
             elif is_recording:
                 control_state = "RECORD"
             elif robot_state == "BOOT":
@@ -527,7 +551,7 @@ class TeleopApp:
 
             if self.robot:
                 try:
-                    obs = self._get_robot_state()
+                    obs = await self._get_robot_state()
                     for comp, positions in obs.get("joint_pos", {}).items():
                         robot_states.append(
                             {
@@ -609,6 +633,11 @@ class TeleopApp:
                         if control_state == "ACTIVE"
                         else control_state,
                     }
+
+                # Subprocesses that died mid-run (see _tail_proc). Surfaced to
+                # the frontend immediately instead of waiting for StateChecker.
+                if self._proc_crashed:
+                    error_data["process_crashed"] = dict(self._proc_crashed)
 
                 robot_states.append(
                     {"topic": "error_state", "data_type": "json", "data": error_data}
@@ -1028,6 +1057,10 @@ class TeleopApp:
             try:
                 async with self._doctor_lock:
                     await asyncio.to_thread(_run)
+            except ValueError as exc:
+                # Precondition violations (brake release active, joints out of
+                # limits) — same 409 semantics as doctor/arm_brakes.
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
             except Exception as exc:
                 logger.exception("doctor/init_arm_safe failed")
                 raise HTTPException(status_code=500, detail=str(exc))
@@ -1103,6 +1136,10 @@ class TeleopApp:
             try:
                 async with self._doctor_lock:
                     await asyncio.to_thread(_run)
+            except ValueError as exc:
+                # Brake release active — precondition violation, same 409
+                # semantics as doctor/arm_brakes.
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
             except Exception as exc:
                 logger.exception(f"doctor/hand ({action}) failed")
                 raise HTTPException(status_code=500, detail=str(exc))
@@ -1368,6 +1405,8 @@ class TeleopApp:
         """Spawn all teleop subprocesses with the given env overrides."""
         if self._teleop_running:
             return
+        self._stop_in_progress = False
+        self._proc_crashed.clear()
 
         env = os.environ.copy()
 
@@ -1436,6 +1475,7 @@ class TeleopApp:
         debug_args = ["--debug"] if self.debug else []
         commands = self._build_teleop_commands(_src, ns_args, debug_args)
 
+        spawned_any = False
         for entry in commands:
             # Each entry is (cmd_list, pre_delay_s). The delay lets earlier
             # processes settle before launching a dependent one — used in VR
@@ -1472,9 +1512,14 @@ class TeleopApp:
                     name=f"log-{name}",
                 ).start()
                 logger.info(f"Started: {' '.join(cmd)}  (pid={proc.pid})")
+                spawned_any = True
             except FileNotFoundError:
                 logger.error(f"Command not found: {name} — is omniteleop installed?")
 
+        if not spawned_any:
+            raise RuntimeError(
+                "Failed to start any teleop process — is omniteleop installed?"
+            )
         self._teleop_running = True
 
         # Subscribe to robot joint feedback published by robot_controller
@@ -1678,6 +1723,8 @@ class TeleopApp:
         """
         import signal
 
+        self._stop_in_progress = True
+
         processes = list(zip(self._procs, self._proc_names))
         others = [pair for pair in processes if pair[1] != self.ARM_HOLDER_PROC]
         arm_holders = [pair for pair in processes if pair[1] == self.ARM_HOLDER_PROC]
@@ -1769,11 +1816,25 @@ class TeleopApp:
         except Exception:
             pass
         finally:
+            rc = proc.poll()
+            # Any non-recorder process exiting with a non-zero code while the
+            # stack is not being torn down is an unexpected crash. Surface it
+            # in error_state immediately — StateChecker can take 20s+ to
+            # notice a dead robot_controller, and the frontend needs the
+            # signal now (the operator may be mid-pause/resume).
+            if (
+                not is_recorder
+                and rc not in (None, 0)
+                and not self._stop_in_progress
+                and self._teleop_running
+            ):
+                with self._log_lock:
+                    self._proc_crashed[name] = rc
+                logger.error(f"{name} exited unexpectedly (code={rc})")
             if is_recorder:
                 self.recorder_ready = False
                 # Subprocess has exited (clean or crash). If we still think
                 # we're recording, flip state so the UI doesn't get stuck.
-                rc = proc.poll()
                 if self.is_recording:
                     self.is_recording = False
                     self.recording_status = (
@@ -1958,7 +2019,7 @@ class TeleopApp:
     # Robot state observation helpers
     # =========================================================================
 
-    def _get_robot_state(self) -> Dict[str, Any]:
+    async def _get_robot_state(self) -> Dict[str, Any]:
         obs: Dict[str, Any] = {"joint_pos": {}, "joint_vel": {}, "wrench": {}}
         rc = self.record_components
 
@@ -1982,30 +2043,54 @@ class TeleopApp:
             for comp in ["left_arm", "right_arm"]:
                 if rc.get(comp) and comp in joint_velocities:
                     obs["joint_vel"][comp] = joint_velocities[comp]
-        elif self.robot:
-            # Fallback: direct hardware read (before robot_controller starts publishing)
-            for comp, getter in [
-                ("left_arm", lambda: self.robot.left_arm.get_joint_pos().tolist()),
-                ("right_arm", lambda: self.robot.right_arm.get_joint_pos().tolist()),
-            ]:
-                if rc.get(comp):
+        if self.robot:
+            # Hardware reads (fallback joints + wrench) run in a thread with a
+            # timeout — a hung SDK read must not freeze the event loop (this
+            # path is shared by GET /state and the 10 Hz state broadcast).
+            def _read_hardware(joints: bool) -> Dict[str, Any]:
+                hw: Dict[str, Any] = {"joint_pos": {}, "wrench": {}}
+                if joints:
+                    for comp in ["left_arm", "right_arm"]:
+                        if not rc.get(comp):
+                            continue
+                        arm = getattr(self.robot, comp, None)
+                        if arm is None:
+                            continue
+                        try:
+                            hw["joint_pos"][comp] = arm.get_joint_pos().tolist()
+                        except Exception:
+                            pass
+                if rc.get("left_wrist_wrench") and self.robot.left_arm.wrench_sensor:
                     try:
-                        obs["joint_pos"][comp] = getter()
+                        w = self.robot.left_arm.wrench_sensor.get_wrench_state()
+                        hw["wrench"]["left"] = {
+                            "force": w[:3].tolist(),
+                            "torque": w[3:].tolist(),
+                        }
                     except Exception:
                         pass
-        if self.robot:
-            if rc.get("left_wrist_wrench") and self.robot.left_arm.wrench_sensor:
-                w = self.robot.left_arm.wrench_sensor.get_wrench_state()
-                obs["wrench"]["left"] = {
-                    "force": w[:3].tolist(),
-                    "torque": w[3:].tolist(),
-                }
-            if rc.get("right_wrist_wrench") and self.robot.right_arm.wrench_sensor:
-                w = self.robot.right_arm.wrench_sensor.get_wrench_state()
-                obs["wrench"]["right"] = {
-                    "force": w[:3].tolist(),
-                    "torque": w[3:].tolist(),
-                }
+                if rc.get("right_wrist_wrench") and self.robot.right_arm.wrench_sensor:
+                    try:
+                        w = self.robot.right_arm.wrench_sensor.get_wrench_state()
+                        hw["wrench"]["right"] = {
+                            "force": w[:3].tolist(),
+                            "torque": w[3:].tolist(),
+                        }
+                    except Exception:
+                        pass
+                return hw
+
+            # Joints read from hardware only when the topic feed is empty
+            # (robot_controller not publishing yet); wrench always from hardware.
+            try:
+                hw = await asyncio.wait_for(
+                    asyncio.to_thread(_read_hardware, not bool(joint_positions)),
+                    timeout=1.0,
+                )
+            except (asyncio.TimeoutError, Exception):
+                hw = {}
+            obs["joint_pos"].update(hw.get("joint_pos", {}))
+            obs["wrench"].update(hw.get("wrench", {}))
         return obs
 
     # =========================================================================
