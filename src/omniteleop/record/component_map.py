@@ -88,6 +88,47 @@ SENSOR_OUTPUT_TO_TOPIC: dict[str, str] = {
 }
 
 
+def _check_known(record_components: Mapping[str, bool]) -> None:
+    """Raise on toggle names that aren't in :data:`COMPONENT_TO_TOPICS`."""
+    unknown = set(record_components) - set(COMPONENT_TO_TOPICS)
+    if unknown:
+        raise ValueError(
+            f"unknown record_components keys: {sorted(unknown)} "
+            f"(known: {sorted(COMPONENT_TO_TOPICS)})"
+        )
+
+
+def prune_to_spec(
+    spec: Spec,
+    record_components: Mapping[str, bool],
+) -> tuple[dict[str, bool], list[str]]:
+    """Turn off toggles this embodiment Spec cannot satisfy.
+
+    The YAML toggles are a *request*; the Spec is the authority on what the
+    embodiment physically has. A ``vega_1u`` / ``vega_1p`` / ``vega_1`` spec
+    declares no ``left_hand`` topics because those variants carry no end
+    effector, so asking to record the hand there is not an error to abort
+    startup over — it is a toggle to switch off and report.
+
+    Unknown toggle names still raise ``ValueError`` (typo / stale YAML).
+
+    Returns:
+        ``(adjusted, dropped)`` — a copy of ``record_components`` with the
+        unsatisfiable toggles set False, and the sorted names turned off.
+    """
+    _check_known(record_components)
+    spec_topics = set(spec.topics())
+    adjusted = {name: bool(v) for name, v in record_components.items()}
+    dropped = [
+        name
+        for name, enabled in adjusted.items()
+        if enabled and not (set(COMPONENT_TO_TOPICS[name]) & spec_topics)
+    ]
+    for name in dropped:
+        adjusted[name] = False
+    return adjusted, sorted(dropped)
+
+
 def resolve_topics(
     spec: Spec,
     record_components: Mapping[str, bool],
@@ -105,17 +146,14 @@ def resolve_topics(
       and stale YAMLs at startup.
     * **Toggle ON but no matching topic in spec** raises ``ValueError``.
       e.g. ``head_left_depth: true`` on a depth-less spec, or ``torso: true``
-      on a ``vega_1u`` (upper-body) spec.
+      on a ``vega_1u`` (upper-body) spec. Callers that want a hardware
+      mismatch reported-and-skipped rather than fatal run
+      :func:`prune_to_spec` first — that is what the recorders do.
     * **Toggle OFF** — its topics are excluded.
     * **Topics with no component** (no entry in ``TOPIC_TO_COMPONENT``) are
       always kept if the spec declares them.
     """
-    unknown = set(record_components) - set(COMPONENT_TO_TOPICS)
-    if unknown:
-        raise ValueError(
-            f"unknown record_components keys: {sorted(unknown)} "
-            f"(known: {sorted(COMPONENT_TO_TOPICS)})"
-        )
+    _check_known(record_components)
 
     spec_topics = set(spec.topics())
     keep: set[str] = {

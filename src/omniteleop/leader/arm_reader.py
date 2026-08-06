@@ -23,6 +23,7 @@ from dexcomm import RateLimiter
 from omniteleop.common import ExoJointData, get_config
 from omniteleop.common.logging import setup_logging
 from omniteleop.common.debug_display import get_debug_display
+from omniteleop.common.platform import AUTO, describe_serial_ports, find_serial_port
 from loguru import logger
 
 
@@ -41,9 +42,11 @@ class LeaderArmReader:
     VELOCITY_SCALE = 0.229  # Velocity unit in rpm
     RPM_TO_RAD_S = 2 * math.pi / 60.0  # Convert rpm to rad/s
 
-    # Default configuration values
+    # Default configuration values. The port is auto-detected by USB id rather
+    # than hardcoded: the U2D2 is /dev/ttyUSB* on Linux and /dev/cu.usbserial-*
+    # on macOS, and the index moves with enumeration order on both.
     DEFAULT_BAUD_RATE = 3000000
-    DEFAULT_PORT = "/dev/ttyUSB0"
+    DEFAULT_PORT = AUTO
     DEFAULT_PUBLISH_RATE = 40
     DEFAULT_DEBUG_REFRESH_RATE = 10
 
@@ -91,12 +94,29 @@ class LeaderArmReader:
 
         # Get port and baud rate from config or use overrides
         if com_port:
-            self.com_port = com_port
+            configured_port = com_port
             self.baud_rate = baud_rate or self.DEFAULT_BAUD_RATE
         else:
             # Get from config - using the single port defined at top level
-            self.com_port = self.arm_configs.get("port", self.DEFAULT_PORT)
+            configured_port = self.arm_configs.get("port", self.DEFAULT_PORT)
             self.baud_rate = self.arm_configs.get("baud_rate", self.DEFAULT_BAUD_RATE)
+
+        # An existing path is used as given; "auto" (or a path that doesn't
+        # exist on this OS) resolves by USB vendor/product id instead, which is
+        # what lets one config file work on both Ubuntu and macOS.
+        self.com_port = find_serial_port(
+            configured_port,
+            serial_number=self.arm_configs.get("port_serial_number"),
+            vid_pid=self.arm_configs.get("port_vid_pid"),
+        )
+        if self.com_port is None:
+            # Keep the configured value (when it names something concrete) so
+            # _initialize_hardware reports a useful failure.
+            self.com_port = (
+                configured_port
+                if configured_port and str(configured_port).lower() != AUTO
+                else ""
+            )
 
         # Hardware interfaces (single port for all motors)
         self.port_handler: Optional[PortHandler] = None
@@ -174,12 +194,23 @@ class LeaderArmReader:
         Returns:
             True if hardware initialization successful, False otherwise
         """
+        if not self.com_port:
+            logger.error(
+                "No leader-arm serial port found. Ports visible: "
+                f"{describe_serial_ports()}. Plug in the U2D2, or set "
+                "leader_arms.port / --com-port to an explicit device path."
+            )
+            return False
+
         try:
             self.port_handler = PortHandler(self.com_port)
             self.packet_handler = PacketHandler(self.PROTOCOL_VERSION)
 
             if not self.port_handler.openPort():
-                logger.error(f"Failed to open port {self.com_port}")
+                logger.error(
+                    f"Failed to open port {self.com_port}. Ports visible: "
+                    f"{describe_serial_ports()}"
+                )
                 return False
 
             if not self.port_handler.setBaudRate(self.baud_rate):

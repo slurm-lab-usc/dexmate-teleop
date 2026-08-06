@@ -39,7 +39,30 @@ except ImportError:
     RERUN_AVAILABLE = False
 
 
-_JOINT_COMPONENTS = ("left_arm", "right_arm", "torso", "head", "left_hand", "right_hand")
+JOINT_COMPONENTS = ("left_arm", "right_arm", "torso", "head", "left_hand", "right_hand")
+
+# Fallbacks for toggles the robot YAML's ``recorder.components`` omits.
+#
+# Core joints (arms/torso/head) default on; optional sensors default off. End
+# effectors also default OFF: a hand/gripper is per-variant hardware — the
+# vega_1u / vega_1p / vega_1 configs describe robots with no end effector at
+# all — so recording one is an explicit opt-in, never an assumption. Every
+# hand-equipped config (``*_f5d6``, ``*_gripper``) sets these keys explicitly.
+DEFAULT_RECORD_COMPONENTS: Dict[str, bool] = {
+    "left_arm": True,
+    "right_arm": True,
+    "torso": True,
+    "head": True,
+    "left_hand": False,
+    "right_hand": False,
+    "head_left_rgb": True,
+    "head_right_rgb": True,
+    "head_left_depth": False,
+    "left_wrist_rgb": False,
+    "right_wrist_rgb": False,
+    "left_wrist_wrench": False,
+    "right_wrist_wrench": False,
+}
 
 
 class BaseRecorder:
@@ -78,21 +101,10 @@ class BaseRecorder:
         self.jpeg_quality = recorder_config.get("jpeg_quality", 90)
         self.auto_stop_on_estop = recorder_config.get("auto_stop_on_estop", True)
 
-        components_config = recorder_config.get("components", {})
+        components_config = recorder_config.get("components", {}) or {}
         self.record_components: Dict[str, bool] = {
-            "left_arm": components_config.get("left_arm", True),
-            "right_arm": components_config.get("right_arm", True),
-            "torso": components_config.get("torso", True),
-            "head": components_config.get("head", True),
-            "left_hand": components_config.get("left_hand", True),
-            "right_hand": components_config.get("right_hand", True),
-            "head_left_rgb": components_config.get("head_left_rgb", True),
-            "head_right_rgb": components_config.get("head_right_rgb", True),
-            "head_left_depth": components_config.get("head_left_depth", False),
-            "left_wrist_rgb": components_config.get("left_wrist_rgb", False),
-            "right_wrist_rgb": components_config.get("right_wrist_rgb", False),
-            "left_wrist_wrench": components_config.get("left_wrist_wrench", False),
-            "right_wrist_wrench": components_config.get("right_wrist_wrench", False),
+            name: bool(components_config.get(name, default))
+            for name, default in DEFAULT_RECORD_COMPONENTS.items()
         }
 
         # Episode state.
@@ -137,6 +149,45 @@ class BaseRecorder:
     def _node_name(self) -> str:
         return self.__class__.__name__.lower()
 
+    # ─── Component availability ────────────────────────────────────────────
+
+    def _drop_unavailable_components(self, robot: Any) -> None:
+        """Turn off joint toggles whose hardware this robot doesn't have.
+
+        ``record_components`` is what the YAML *asks* for; the live robot is
+        the authority on what exists. Reading an absent component raises in
+        dexcontrol ("Component 'left_hand' is not available on this robot"),
+        which would otherwise blow up every record-loop tick, so reconcile
+        once at init and warn instead.
+
+        Subclasses call this right after building their ``Robot``; that is the
+        point where ``record_components`` is final, so this also logs the
+        effective set.
+        """
+        has_component = getattr(robot, "has_component", None)
+        if has_component is None:
+            return
+        for comp in JOINT_COMPONENTS:
+            if not self.record_components.get(comp, False):
+                continue
+            try:
+                present = bool(has_component(comp))
+            except Exception as e:  # noqa: BLE001 — never block startup on this
+                logger.debug(f"has_component({comp}) failed: {e}")
+                continue
+            if present:
+                continue
+            self.record_components[comp] = False
+            logger.warning(
+                f"recorder.components.{comp} is enabled but this robot has no "
+                f"{comp} — not recording its state or actions"
+            )
+
+        enabled = [k for k, v in self.record_components.items() if v]
+        disabled = [k for k, v in self.record_components.items() if not v]
+        logger.info(f"Recording: {', '.join(enabled) or 'nothing'}")
+        logger.info(f"Not recording: {', '.join(disabled) or 'nothing'}")
+
     # ─── Action resolution (pure logic) ────────────────────────────────────
 
     def _resolve_action(self, joint_pos: Dict[str, Any]) -> Dict[str, Any]:
@@ -145,7 +196,7 @@ class BaseRecorder:
         """
         resolved: Dict[str, Any] = {}
         with self.action_lock:
-            for comp in _JOINT_COMPONENTS:
+            for comp in JOINT_COMPONENTS:
                 if not self.record_components.get(comp, False):
                     continue
                 if comp in self.current_action:

@@ -5,7 +5,10 @@ input_handlers:
   exo_joycon:
     leader_arms:
       compensate_torso_pitch: true
-      port: "/dev/ttyUSB0"
+      # "auto" detects the U2D2 by USB id (works on Linux and macOS, and
+      # survives a changing ttyUSB index). Set an explicit device path, or
+      # port_serial_number: "FTC04DXY", to pin one of several adapters.
+      port: "auto"
       baud_rate: 3000000
       left_arm:
         motor_ids: [101, 102, 103, 104, 105, 106, 107]
@@ -18,6 +21,7 @@ input_handlers:
 
     joycon:
       stick_deadzone: 0.3
+      # backend: auto   # auto | evdev (Linux hid-nintendo) | hid (raw HID, macOS)
 
     button_timings:
       default_debounce: 0.01
@@ -129,6 +133,8 @@ recorder:
     right_arm: true
     torso: true
     head: true
+    left_hand: false   # No end effector on this variant
+    right_hand: false  # No end effector on this variant
     head_left_rgb: true
     head_right_rgb: true
     head_left_depth: false

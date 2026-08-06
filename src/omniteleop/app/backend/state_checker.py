@@ -12,6 +12,8 @@ from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
 
+from omniteleop.common.platform import AUTO, find_serial_port, joycons_present
+
 
 class StateChecker:
     """Determines robot control state via a priority-based logic tree.
@@ -124,6 +126,10 @@ class StateChecker:
         # Diagnosis details populated on each call to _check_active_conditions.
         self._diagnosis_details: dict = {}
 
+        # Leader-arm serial port as configured; _check_exo_hardware resolves it
+        # by USB id so this agrees with arm_reader on Linux and macOS alike.
+        self.exo_port: str = AUTO
+
         # Init positions loaded from the same config CommandProcessor reads.
         # Used by the init_pos ALIGN criterion — if any exo joint drifts more
         # than INIT_POS_ALIGN_THRESHOLD from init_pos, CommandProcessor will
@@ -133,6 +139,7 @@ class StateChecker:
             _cfg = get_config()
             _recorder = (_cfg.get("recorder") or {})
             _rec_components = (_recorder.get("components") or {})
+            self.exo_port = (_cfg.get_leader_arms() or {}).get("port", AUTO)
         except Exception:
             _recorder = {}
             _rec_components = {}
@@ -407,22 +414,17 @@ class StateChecker:
         return all(self._diagnosis_details.values())
 
     def _check_joycons_connected(self) -> bool:
-        """Checks if both JoyCon controllers are connected via Bluetooth.
+        """Checks if both JoyCon controllers are connected.
+
+        Delegates to :func:`omniteleop.common.platform.joycons_present`, which
+        asks BlueZ on Linux and enumerates HID devices on macOS — the
+        ``bluetoothctl`` CLI this used to shell out to is Linux-only.
 
         Returns:
-            True if both Joy-Con (L) and Joy-Con (R) are connected.
+            True if both Joy-Con (L) and Joy-Con (R) are present.
         """
-        try:
-            result = subprocess.run(
-                ["bluetoothctl", "devices", "Connected"],
-                capture_output=True,
-                text=True,
-                timeout=5.0,
-            )
-            output = result.stdout
-            return "Joy-Con (L)" in output and "Joy-Con (R)" in output
-        except Exception:
-            return False
+        status = joycons_present()
+        return status["left"] and status["right"]
 
     def _required_processes(self) -> List[str]:
         """Process names that must be running for DIAGNOSIS to pass.
@@ -458,10 +460,18 @@ class StateChecker:
     def _check_exo_hardware(self) -> bool:
         """Checks if the exoskeleton serial port is accessible.
 
+        The port is resolved the same way ``arm_reader`` resolves it (by USB
+        id) rather than assumed to be ``/dev/ttyUSB0``, so this check agrees
+        with the reader on both Ubuntu (``/dev/ttyUSB*``) and macOS
+        (``/dev/cu.usbserial-*``).
+
         Returns:
-            True if ``/dev/ttyUSB0`` is readable and writable.
+            True if the adapter is present and readable/writable.
         """
-        return os.access("/dev/ttyUSB0", os.R_OK | os.W_OK)
+        port = find_serial_port(self.exo_port)
+        if not port:
+            return False
+        return os.access(port, os.R_OK | os.W_OK)
 
     def _check_exo_motors(self, topic_list: str) -> bool:
         """Checks if the exo arm reader is publishing joint data.

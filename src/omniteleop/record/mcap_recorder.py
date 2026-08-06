@@ -54,7 +54,7 @@ from dexdata.metadata import (
 from dexdata.spec import Spec, load_spec, restrict
 from omniteleop.common.logging import setup_logging
 from omniteleop.record.base_recorder import BaseRecorder
-from omniteleop.record.component_map import resolve_topics
+from omniteleop.record.component_map import prune_to_spec, resolve_topics
 from omniteleop.record.sensors import (
     ACTION_PRODUCERS,
     Reading,
@@ -108,6 +108,17 @@ class MCAPRecorder(BaseRecorder):
                 f"or extend dexdata/src/dexdata/specs/embodiment/ with this spec."
             )
         full_spec = load_spec(spec_path)
+        #    A toggle the embodiment can't satisfy (e.g. left_hand on a
+        #    vega_1u, which has no end effector) is switched off and reported
+        #    rather than aborting startup.
+        adjusted, dropped = prune_to_spec(full_spec, self.record_components)
+        if dropped:
+            logger.warning(
+                f"spec {full_spec.spec_id!r} declares no topics for "
+                f"{', '.join(dropped)} — this robot has no such hardware, "
+                f"not recording them"
+            )
+            self.record_components.update(adjusted)
         wanted_topics = resolve_topics(full_spec, self.record_components)
 
         # 2) Build sensor descriptors, then flip dexcontrol's per-sensor
@@ -120,7 +131,9 @@ class MCAPRecorder(BaseRecorder):
 
         self.robot = Robot(configs=robot_configs)
 
-        # 3) Drop topics whose hardware is missing on this specific robot.
+        # 3) Reconcile the toggles against the live robot, then drop topics
+        #    whose hardware is missing on this specific robot.
+        self._drop_unavailable_components(self.robot)
         missing: set[str] = set()
         for sensor in self._state_sensors:
             relevant = sensor.topics & wanted_topics

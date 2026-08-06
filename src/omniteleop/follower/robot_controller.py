@@ -225,6 +225,12 @@ class RobotController:
 
         # Parse home positions from config (no hardware movement)
         self._parse_home_positions()
+        
+        logger.info("Disable torso auto-idle mode")
+        if self.has_torso:
+            self.robot.torso.set_idle_mode(False)
+        else:
+            logger.warning("Robot has no torso, cannot disable auto-idle mode")
 
         if self.interpolation_method == "ruckig":
             self._init_ruckig_generators()
@@ -296,7 +302,7 @@ class RobotController:
                 cmd_pos = np.array(gen.out.new_position)
 
                 if component == "torso":
-                    self.robot.torso.set_joint_pos(cmd_pos, wait_time=0.0)
+                    self.robot.torso.move_to_joint_pos(cmd_pos)
                 elif component in {"left_arm", "right_arm"}:
                     getattr(self.robot, component).set_joint_pos(cmd_pos, wait_time=0.0)
 
@@ -419,10 +425,9 @@ class RobotController:
         """Send torso directly to its home position (no planning)."""
         if not (self.has_torso and "torso" in self.home_positions):
             return
-        self.robot.torso.set_joint_pos(
+        self.robot.move_torso_to_joint_pos(
             self.home_positions["torso"],
-            wait_time=9.0,
-            exit_on_reach=True,
+            timeout=5.0,
         )
 
     def _move_head_to_home_direct(self) -> None:
@@ -470,20 +475,57 @@ class RobotController:
             init_local_ik=False,
         )
 
-        # Resolve any existing self-collision before planning the main motion.
-        MoveOutOfSelfCollisionTask(
-            initial_joint_configuration=mm_init_config,
-            motion_manager=motion_manager,
-            range_size=0.3,
-            visualize=False,
-        ).run()
-
         # Arms-only dicts for the planner. Its pinocchio model's joint_names
         # is the authoritative set — start/goal keys must exactly equal it.
         assert motion_manager.pin_robot is not None
         planner_joint_names = robot_utils.get_joint_names(motion_manager.pin_robot)
 
+        # Resolve any existing self-collision before planning the main motion.
+        # MoveOutOfSelfCollisionTask only *computes* a collision-free config; it
+        # does not command the robot. We must physically move the arms there,
+        # otherwise the OMPL start state below is still in collision and
+        # RRTConnect rejects it ("invalid start state").
+        present, escape_success, escape_cfg = MoveOutOfSelfCollisionTask(
+            initial_joint_configuration=mm_init_config,
+            motion_manager=motion_manager,
+            range_size=0.3,
+            visualize=False,
+        ).run()
+        if present:
+            if not escape_success:
+                raise RuntimeError(
+                    "Robot is in self-collision and no collision-free "
+                    "configuration could be found"
+                )
+            # escape_cfg is keyed by the pinocchio joint names, i.e. the same
+            # planner_joint_names used everywhere here.
+            escape_arms = {
+                name: float(escape_cfg[name])
+                for name in planner_joint_names
+                if name in escape_cfg
+            }
+            # Interpolate from the in-collision start (the config the task was
+            # initialized with, arms-only) to the collision-free config and move
+            # the real arms there — same approach as dexcontrol's
+            # ArmSafeInitializer._handle_self_collisions.
+            in_collision_arms = {
+                name: float(mm_init_config[name])
+                for name in planner_joint_names
+                if name in mm_init_config
+            }
+            logger.info("Moving arms out of self-collision before planning...")
+            self._move_arms_out_of_collision(
+                in_collision_arms, escape_arms, planner_joint_names
+            )
+            logger.info("Waiting for robot to stabilize...")
+            time.sleep(3)
+
+        # Seed the OMPL start from the live robot position. When we escaped a
+        # collision above we waited for the arms to settle first, so this
+        # readback reflects the real (now collision-free) pose. Sync the
+        # MotionManager's collision model to the same live pose.
         start_arms = self._current_arms_qpos_dict(planner_joint_names)
+        motion_manager.set_joint_pos(start_arms)
         goal_arms = self._home_arms_qpos_dict(planner_joint_names)
 
         planner_task = MoveToConfigurationTask(
@@ -558,6 +600,63 @@ class RobotController:
                     np.array([waypoint[j] for j in left_names]), wait_time=0.0
                 )
             if has_right:
+                self.robot.right_arm.set_joint_pos(
+                    np.array([waypoint[j] for j in right_names]), wait_time=0.0
+                )
+            rate_limiter.sleep()
+
+    def _move_arms_out_of_collision(
+        self,
+        start_arms: Dict[str, float],
+        collision_free_arms: Dict[str, float],
+        planner_joint_names: List[str],
+        collision_escape_time: float = 2.0,
+    ) -> None:
+        """Move the real arms from their in-collision pose to a safe config.
+
+        Mirrors ArmSafeInitializer._handle_self_collisions in dexcontrol
+        (examples/advanced_examples/init_arm_safe.py): linearly interpolate
+        between the start (in-collision) and collision-free configs over
+        control_hz * collision_escape_time steps, stream to the real arms, then
+        let the caller wait for the robot to stabilize before planning.
+
+        Args:
+            start_arms: In-collision arm positions keyed by planner joint names.
+            collision_free_arms: Target safe positions, same keying.
+            planner_joint_names: Authoritative joint-name ordering.
+            collision_escape_time: Seconds over which to make the escape move.
+        """
+        joints = [
+            n
+            for n in planner_joint_names
+            if n in start_arms and n in collision_free_arms
+        ]
+        if not joints:
+            return
+
+        num_steps = int(self.control_rate * collision_escape_time)
+        trajectory: List[Dict[str, float]] = []
+        for i in range(num_steps + 1):
+            alpha = i / num_steps
+            trajectory.append(
+                {
+                    n: (1 - alpha) * start_arms[n] + alpha * collision_free_arms[n]
+                    for n in joints
+                }
+            )
+
+        left_names = self.robot.left_arm.joint_name
+        right_names = self.robot.right_arm.joint_name
+        has_left = "left_arm" in self.home_positions
+        has_right = "right_arm" in self.home_positions
+
+        rate_limiter = RateLimiter(self.control_rate)
+        for waypoint in trajectory:
+            if has_left and all(j in waypoint for j in left_names):
+                self.robot.left_arm.set_joint_pos(
+                    np.array([waypoint[j] for j in left_names]), wait_time=0.0
+                )
+            if has_right and all(j in waypoint for j in right_names):
                 self.robot.right_arm.set_joint_pos(
                     np.array([waypoint[j] for j in right_names]), wait_time=0.0
                 )
@@ -839,7 +938,7 @@ class RobotController:
         if "right_arm" in components:
             arm_commands["right_arm"] = components["right_arm"]["pos"]
         if arm_commands:
-            self.robot.set_joint_pos(arm_commands, wait_time=5.0, exit_on_reach=True)
+            self.robot.move_to_joint_pos(arm_commands)
 
     def _send_base_command(self, base_data: Dict):
         """Send command to mobile base.
@@ -851,7 +950,6 @@ class RobotController:
             vx=base_data["vx"],
             vy=base_data["vy"],
             wz=base_data["wz"],
-            sequential_steering=abs(base_data["vy"]) > 0.02,
         )
 
     def _send_torso_command(self, torso_data: Dict):
@@ -860,18 +958,10 @@ class RobotController:
         Args:
             torso_data: Dictionary with position and velocity.
         """
-        if self.interpolation_method == "none":
-            self.robot.torso.set_joint_pos_vel(
-                torso_data["pos"],
-                0.2,
-                wait_time=0.0,
-            )
-        else:
-            self.robot.torso.set_joint_pos_vel(
-                torso_data["pos"],
-                torso_data["vel"],
-                wait_time=0.0,
-            )
+        # logger.info(f'Debugging interploration_method: {self.interpolation_method} and torso_data: {torso_data}')
+        self.robot.torso.move_joint_pos(
+            torso_data["pos"],
+        )
 
     def _send_head_command(self, head_data: Dict):
         """Send command to head joints.
@@ -883,7 +973,7 @@ class RobotController:
         if head is not None:
             if "pos" in head_data:
                 positions = head_data["pos"]
-                head.set_joint_pos(positions, wait_time=0.0)
+                head.set_joint_pos(positions)
 
     def _send_arm_command(self, arm_name: str, arm_data: Dict):
         """Send command to arm.
@@ -896,11 +986,7 @@ class RobotController:
         if arm is not None:
             if "pos" in arm_data:
                 positions = arm_data["pos"]
-                if "vel" in arm_data and self.use_velocity_control:
-                    velocities = arm_data["vel"]
-                    arm.set_joint_pos_vel(positions, velocities)
-                else:
-                    arm.set_joint_pos(positions, wait_time=0.0)
+                arm.move_joint_pos(positions, velocity_scale=1.0)
 
     def _send_hand_command(self, hand_name: str, hand_data: Dict):
         """Send command to hand.
@@ -913,7 +999,7 @@ class RobotController:
         if hand is not None:
             if "pos" in hand_data:
                 positions = hand_data["pos"]
-                hand.set_joint_pos(positions, relative=False, wait_time=0.0)
+                hand.set_joint_pos(positions)
 
     def _publish_joint_feedback(self):
         """Publish robot joint positions and velocities at specified rate."""
@@ -1006,7 +1092,13 @@ class RobotController:
         # Telemetry publisher cleanup handled by Node
 
         if self.robot:
+            logger.info("Re-enabling torso auto-idle mode")
+            if self.has_torso:
+                self.robot.torso.set_idle_mode(True)
+            else:
+                logger.warning("Robot has no torso, cannot re-enable auto-idle mode")
             self.robot.shutdown()
+            
 
         # Node handles cleanup
         self.node.shutdown()
