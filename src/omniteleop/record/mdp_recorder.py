@@ -290,23 +290,16 @@ class MDPRecorder(BaseRecorder):
         observation: Dict[str, Any] = {"joint_pos": {}, "joint_vel": {}}
         if self.robot is None:
             return observation
-        # Joint positions — unchanged from pre-refactor MDPRecorder.
-        if self.record_components["left_arm"]:
-            observation["joint_pos"]["left_arm"] = self.robot.left_arm.get_joint_pos().tolist()
-        if self.record_components["right_arm"]:
-            observation["joint_pos"]["right_arm"] = self.robot.right_arm.get_joint_pos().tolist()
-        if self.record_components["torso"] and hasattr(self.robot, "torso"):
-            observation["joint_pos"]["torso"] = self.robot.torso.get_joint_pos().tolist()
-        if self.record_components["head"] and hasattr(self.robot, "head"):
-            observation["joint_pos"]["head"] = self.robot.head.get_joint_pos().tolist()
-        if self.record_components["left_hand"]:
-            observation["joint_pos"]["left_hand"] = self.robot.left_hand.get_joint_pos().tolist()
-        if self.record_components["right_hand"]:
-            observation["joint_pos"]["right_hand"] = self.robot.right_hand.get_joint_pos().tolist()
-        if self.record_components["left_arm"] and hasattr(self.robot.left_arm, "get_joint_vel"):
-            observation["joint_vel"]["left_arm"] = self.robot.left_arm.get_joint_vel().tolist()
-        if self.record_components["right_arm"] and hasattr(self.robot.right_arm, "get_joint_vel"):
-            observation["joint_vel"]["right_arm"] = self.robot.right_arm.get_joint_vel().tolist()
+        # Joint positions. Every enabled component is guaranteed present on the
+        # robot — initialize() dropped the ones this variant doesn't have.
+        for comp in JOINT_COMPONENTS:
+            if self.record_components[comp]:
+                part = getattr(self.robot, comp)
+                observation["joint_pos"][comp] = part.get_joint_pos().tolist()
+        for comp in ("left_arm", "right_arm"):
+            part = getattr(self.robot, comp, None)
+            if self.record_components[comp] and hasattr(part, "get_joint_vel"):
+                observation["joint_vel"][comp] = part.get_joint_vel().tolist()
         # Camera images merged into observation under per-camera keys.
         if self.save_images and self.robot:
             head_keys = []

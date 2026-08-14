@@ -56,9 +56,11 @@ trap cleanup EXIT INT TERM
 #   exoskeleton → arm_reader, joycon_reader, command_processor, robot_controller
 #   vr          → paddle_leader, robot_controller
 #   vr_sim      → paddle_leader
-# Plus the recorder subprocesses (mcap_recorder, mdp_recorder), which run as
+# Plus the recorder subprocesses (mcap_recorder, mdp_recorder), the replay
+# publisher (replay_record), and the wrist camera adapter, which run as
 # `python -m omniteleop.record.<module>` so we match the module path too.
-STALE_PATTERN="joycon_reader\.py|arm_reader\.py|robot_controller\.py|command_processor\.py|paddle_leader\.py|omniteleop\.record\.(mcap|mdp)_recorder|omniteleop\.record\.wrist_camera_adapter"
+STALE_PATTERN="joycon_reader\.py|arm_reader\.py|robot_controller\.py|command_processor\.py|paddle_leader\.py|omniteleop\.record\.((mcap|mdp)_recorder|replay_record|wrist_camera_adapter)"
+
 STALE_PIDS=$(pgrep -f "$STALE_PATTERN" || true)
 if [[ -n "$STALE_PIDS" ]]; then
   echo "→ Killing stale teleop processes: $STALE_PIDS"

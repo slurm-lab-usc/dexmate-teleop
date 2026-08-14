@@ -11,7 +11,10 @@ input_handlers:
     # Leader arms (exoskeleton) configuration
     leader_arms:
       compensate_torso_pitch: false  # No torso on upper body robot
-      port: "/dev/ttyUSB0"
+      # "auto" detects the U2D2 by USB id (works on Linux and macOS, and
+      # survives a changing ttyUSB index). Set an explicit device path, or
+      # port_serial_number: "FTC04DXY", to pin one of several adapters.
+      port: "auto"
       baud_rate: 3000000
       left_arm:
         motor_ids: [101, 102, 103, 104, 105, 106, 107]
@@ -25,6 +28,7 @@ input_handlers:
     # JoyCon-specific settings
     joycon:
       stick_deadzone: 0.3
+      # backend: auto   # auto | evdev (Linux hid-nintendo) | hid (raw HID, macOS)
 
     # Button timing configuration
     button_timings:

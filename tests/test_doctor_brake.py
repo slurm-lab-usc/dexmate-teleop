@@ -143,5 +143,5 @@ def test_motion_guard_rejects_any_active_release() -> None:
     bot.right_arm.enabled = True
     bot.right_arm.joints = [5]
 
-    with pytest.raises(RuntimeError, match="before movement"):
+    with pytest.raises(ValueError, match="before movement"):
         _require_arm_brakes_engaged(_read_arm_brake_status(bot))

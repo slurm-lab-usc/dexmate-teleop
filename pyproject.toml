@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "omniteleop"
-version = "0.4.3"
+version = "0.5.1"
 description = "Universal teleoperation system for robot control"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -38,10 +38,14 @@ dependencies = [
     "rerun-sdk>=0.15.0",  # Rerun visualization for robotics data
     "opencv-python>=4.5.0",  # For image processing in recorder
     "dexcomm>=0.4.0",
-    "dexmotion>=0.4.0",
-    "ompl==1.7.0",
+    # Motion planning stack for the follower. Linux-only markers: ompl ships no
+    # macOS wheels, and a Mac is only ever a leader machine (exoskeleton +
+    # Joy-Cons + GUI) — the follower runs on the robot. To do planning work on
+    # macOS anyway, install these by hand (e.g. `brew install ompl`).
+    "dexmotion>=0.4.0; sys_platform == 'linux'",
+    "ompl==1.7.0; sys_platform == 'linux'",
     "hatch",
-    "joycon-lib",
+    "joycon-lib",  # brings in evdev on Linux / hidapi elsewhere
     "fastapi>=0.100.0",
     "dextop",
     "uvicorn[standard]>=0.20.0",

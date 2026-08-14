@@ -16,6 +16,7 @@ from dexcomm import RateLimiter
 from omniteleop.common import JoyConData, get_config
 from omniteleop.common.logging import setup_logging
 from omniteleop.common.debug_display import get_debug_display
+from omniteleop.common.platform import default_joycon_backend
 from loguru import logger
 
 
@@ -29,6 +30,7 @@ class JoyConReader:
         topic: Optional[str] = None,
         deadzone: float = 0.1,
         debug: bool = False,
+        backend: Optional[str] = None,
     ):
         """Initialize JoyCon reader.
 
@@ -38,6 +40,8 @@ class JoyConReader:
             topic: Override topic (uses config if None)
             deadzone: Analog stick deadzone threshold
             debug: Enable debug output
+            backend: joycon_lib backend ("evdev", "hid"). None/"auto" picks the
+                one that works on this OS.
         """
         # Initialize Node (namespace is handled automatically by Node)
         self.node = Node(name="joycon_reader", namespace=namespace)
@@ -49,6 +53,14 @@ class JoyConReader:
         self.publish_rate = publish_rate or config.get_rate("input_rate", 40)
         self.topic = topic or config.get_topic("exo_joycon")
         self.deadzone = deadzone
+
+        # Backend priority: CLI flag > config > per-OS default. evdev needs the
+        # Linux hid-nintendo driver; macOS has no such driver and talks raw HID.
+        configured_backend = backend or config.get_joycon_config().get("backend")
+        if configured_backend and str(configured_backend).lower() != "auto":
+            self.backend = str(configured_backend).lower()
+        else:
+            self.backend = default_joycon_backend()
 
         # JoyCon interface
         self.joycons = None
@@ -70,7 +82,10 @@ class JoyConReader:
                 "JoyCon", self.publish_rate, refresh_rate=10
             )
 
-        logger.info(f"JoyCon reader configured: {self.publish_rate}Hz -> {self.topic}")
+        logger.info(
+            f"JoyCon reader configured: {self.publish_rate}Hz -> {self.topic} "
+            f"(backend: {self.backend})"
+        )
 
     def initialize(self) -> bool:
         """Initialize JoyCon and Zenoh communication."""
@@ -81,8 +96,8 @@ class JoyConReader:
             )
 
             # Initialize JoyCon controllers
-            logger.info("Connecting to JoyCon controllers...")
-            self.joycons = DualJoyCon(use_backend="evdev")
+            logger.info(f"Connecting to JoyCon controllers ({self.backend} backend)...")
+            self.joycons = DualJoyCon(use_backend=self.backend)
 
             # Connect to controllers
             self.joycons.connect(auto_find=True)
@@ -129,14 +144,29 @@ class JoyConReader:
             return 0.0
         return value
 
-    def _check_joycon_fds(self) -> Dict[str, bool]:
-        """Return per-side liveness based on evdev device node existence.
+    def _check_joycon_liveness(self) -> Dict[str, bool]:
+        """Return per-side liveness, whichever backend is in use.
 
         ``DualJoyCon.is_connected()`` only checks whether the Python handle is
-        non-None, which never flips when a Joy-Con drops off Bluetooth. The
-        kernel, however, removes ``/dev/input/eventN`` immediately on radio
-        disconnect — so checking the path is a fast, reliable signal.
+        non-None, which never flips when a Joy-Con drops off Bluetooth, so we
+        need a real liveness signal.
+
+        Newer joycon_lib versions expose ``is_alive()`` — the HID backend
+        reports it from failed reads, evdev from the device node. Older
+        versions don't, so fall back to the evdev device-node check: the kernel
+        removes ``/dev/input/eventN`` immediately on radio disconnect.
         """
+        probe = getattr(self.joycons, "is_alive", None)
+        if callable(probe):
+            try:
+                status = probe()
+                return {
+                    "left": bool(status.get("left", False)),
+                    "right": bool(status.get("right", False)),
+                }
+            except Exception as e:  # noqa: BLE001 — fall through to the path check
+                logger.debug(f"is_alive() probe failed: {e}")
+
         result = {"left": False, "right": False}
         for side in ("left", "right"):
             joycon = getattr(self.joycons, f"{side}_joycon", None)
@@ -144,7 +174,12 @@ class JoyConReader:
                 continue
             evdev_device = getattr(getattr(joycon, "device", None), "device", None)
             path = getattr(evdev_device, "path", None)
-            if path and os.path.exists(path):
+            if path:
+                result[side] = os.path.exists(path)
+            else:
+                # No device node to inspect (non-evdev backend on an older
+                # joycon_lib): trust the handle rather than reporting a
+                # disconnect we cannot actually observe.
                 result[side] = True
         return result
 
@@ -247,7 +282,7 @@ class JoyConReader:
 
         try:
             while True:
-                status = self._check_joycon_fds()
+                status = self._check_joycon_liveness()
                 if not (status["left"] and status["right"]):
                     dropped = [s for s in ("left", "right") if not status[s]]
                     logger.error(
@@ -319,6 +354,7 @@ def main(
     topic: Optional[str] = None,
     deadzone: float = 0.1,
     debug: bool = False,
+    backend: Optional[str] = None,
 ):
     """Main entry point for JoyCon reader.
 
@@ -330,6 +366,8 @@ def main(
         topic: Override topic (uses config if None)
         deadzone: Analog stick deadzone threshold
         debug: Enable debug output
+        backend: Force a joycon_lib backend - "evdev" (Linux hid-nintendo) or
+            "hid" (raw HID, required on macOS). Defaults to per-OS auto-select.
     """
     # Setup logging
     logger = setup_logging(debug)
@@ -343,6 +381,7 @@ def main(
         topic=topic,
         deadzone=deadzone,
         debug=debug,
+        backend=backend,
     )
 
     if not reader.initialize():

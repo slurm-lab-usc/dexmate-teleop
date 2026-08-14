@@ -45,6 +45,8 @@ from omniteleop.app.backend.state_checker import StateChecker
 from omniteleop.app.backend.backend_utils.state_manager import state_manager
 from omniteleop.app.backend.backend_utils.state_publisher import state_publisher
 from omniteleop.app.backend.backend_utils.video_publisher import video_publisher
+from omniteleop.record.base_recorder import DEFAULT_RECORD_COMPONENTS
+from omniteleop.record.episode_loader import detect_format, inspect_episode
 
 
 # Recording is now delegated to the mcap_recorder subprocess (spawned when
@@ -301,26 +303,12 @@ class TeleopApp:
 
         # ---- component flags -----------------------------------------------
         # Load all component flags from config; any key present in the yaml is
-        # respected. Keys not in the yaml default to True for the core joints,
-        # False for optional sensors (wrist cameras/wrenches).
-        components_cfg = recorder_cfg.get("components", {})
-        _defaults: Dict[str, bool] = {
-            "left_arm": True,
-            "right_arm": True,
-            "torso": True,
-            "head": True,
-            "left_hand": True,
-            "right_hand": True,
-            "head_left_rgb": True,
-            "head_right_rgb": True,
-            "head_left_depth": False,
-            "left_wrist_rgb": False,
-            "right_wrist_rgb": False,
-            "left_wrist_wrench": False,
-            "right_wrist_wrench": False,
-        }
+        # respected. Keys not in the yaml fall back to the recorders' shared
+        # DEFAULT_RECORD_COMPONENTS so the GUI reports exactly what the
+        # recorder subprocess will actually write.
+        components_cfg = recorder_cfg.get("components", {}) or {}
         self.record_components: Dict[str, bool] = {
-            **_defaults,
+            **DEFAULT_RECORD_COMPONENTS,
             **{k: bool(v) for k, v in components_cfg.items()},
         }
         self.save_images = any(
@@ -346,6 +334,23 @@ class TeleopApp:
         self._lifecycle_task: Optional[asyncio.Task] = None
         self._doctor_lock = asyncio.Lock()
         self._teleop_env: Dict[str, str] = {}  # env passed from frontend at start
+        # Last resolved robot/zenoh env from any successful launch (teleop or
+        # replay). Survives _stop_teleop_procs so a subsequent replay can reuse
+        # the known-good robot connection when its own form fields are blank.
+        self._last_launch_env: Dict[str, str] = {}
+
+        # ---- replay state ----------------------------------------------------
+        # Replay and teleop are mutually exclusive: starting one kills the
+        # other's subprocesses. The replay stack = robot_controller +
+        # replay_record; replay_record is held at its stdin start gate until
+        # POST /replay/begin.
+        self._replay_running = False
+        self._replay_proc: Optional[subprocess.Popen] = None  # stdin gate handle
+        self._replay_lock = threading.Lock()
+        self._replay_status: Dict[str, Any] = {}  # latest replay/status message
+        self._replay_frames: Dict[str, bytes] = {}  # camera -> latest JPEG bytes
+        self._replay_episode: Dict[str, Any] = {}  # inspect_episode() of current
+        self._replay_sub_topics: set = set()  # zenoh topics already subscribed
 
         # ---- per-process log ring-buffers & subscribers -------------------
         # _proc_logs[name] = deque of {"source": name, "line": text}
@@ -688,6 +693,49 @@ class TeleopApp:
                 }
             )
 
+            # Replay state — mirrors the replay_record subprocess's
+            # replay/status topic plus the episode metadata captured at
+            # /replay/start. Drives the Replay tab in the frontend.
+            with self._replay_lock:
+                replay_status = dict(self._replay_status)
+                replay_episode = dict(self._replay_episode)
+            robot_states.append(
+                {
+                    "topic": "replay",
+                    "data_type": "json",
+                    "data": {
+                        "running": self._replay_running,
+                        "state": replay_status.get("state", "idle"),
+                        "frame_idx": replay_status.get("frame_idx", 0),
+                        "total_frames": replay_status.get(
+                            "total", replay_episode.get("num_frames", 0)
+                        ),
+                        "episode": replay_episode.get("path", ""),
+                        "episode_name": replay_episode.get("name", ""),
+                        "format": replay_episode.get("format", ""),
+                        "cameras": replay_episode.get("cameras", []),
+                        "rate_hz": replay_status.get(
+                            "rate_hz", replay_episode.get("rate_hz", 0)
+                        ),
+                    },
+                }
+            )
+
+            # Last-launch robot/zenoh env — lets the Replay tab prefill its
+            # form so replays reuse the known-good robot connection without
+            # retyping it. ROBOT_NAME is intentionally omitted (may be blank /
+            # auto-detected); only the fields the UI form exposes are surfaced.
+            robot_states.append(
+                {
+                    "topic": "launch_env",
+                    "data_type": "json",
+                    "data": {
+                        k: self._last_launch_env.get(k, "")
+                        for k in ("ROBOT_NAME", "ROBOT_CONFIG", "ZENOH_CONFIG")
+                    },
+                }
+            )
+
             return {
                 "timestamp_posix": time.time(),
                 "robots": {"robot": robot_states},
@@ -737,8 +785,8 @@ class TeleopApp:
             sensors = [
                 {"id": "camera_1", "data_type": "video/x-motion-jpeg"},
                 {"id": "camera_2", "data_type": "video/x-motion-jpeg"},
-                {"id": "left_wrist", "data_type": "video/x-motion-jpeg"},
-                {"id": "right_wrist", "data_type": "video/x-motion-jpeg"},
+                {"id": "camera_3", "data_type": "video/x-motion-jpeg"},
+                {"id": "camera_4", "data_type": "video/x-motion-jpeg"},
             ]
             return JSONResponse(content=sensors)
 
@@ -764,6 +812,11 @@ class TeleopApp:
                 raise HTTPException(
                     status_code=403, detail="Cannot start: E-Stop is active"
                 )
+            # Mutual exclusion: teleop and replay never run together. If a
+            # replay stack is up (or finished procs linger), kill it cleanly
+            # before launching teleop.
+            if self._replay_running or self._procs:
+                self._stop_teleop_procs()
             try:
                 body = await request.json()
             except Exception:
@@ -825,6 +878,123 @@ class TeleopApp:
                 content=await build_state_dict(),
                 status_code=202,
             )
+
+        # -- Replay controls -------------------------------------------------
+        #
+        # Replay drives the robot from a recorded episode: robot_controller
+        # (follower) + replay_record (publisher of recorded robot_commands and
+        # camera JPEGs). Mutually exclusive with teleop — each start endpoint
+        # kills the other stack's processes first.
+
+        @app.get("/replay/episodes")
+        async def replay_episodes():
+            """List recorded episodes under the recorder save_dir, newest first."""
+            return JSONResponse(content=self._list_episodes())
+
+        @app.post("/replay/validate")
+        async def replay_validate(request: Request):
+            """Validate a user-supplied episode path.
+
+            Body: {"path": "/path/to/episode"}
+            Returns episode metadata (format, num_frames, rate_hz, cameras).
+            """
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            path = str(body.get("path", "")).strip()
+            if not path:
+                raise HTTPException(status_code=400, detail="Missing 'path'")
+            try:
+                info = inspect_episode(path)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400, detail=f"Not a valid episode: {exc}"
+                )
+            return JSONResponse(content=info)
+
+        @app.post("/replay/start")
+        async def replay_start(request: Request):
+            """Launch the replay stack for an episode.
+
+            Body: {"path": "/path/to/episode", "env": {...}}  (env optional,
+            same keys as /teleop/start).
+
+            Cleanly kills any running teleop/replay subprocesses first, then
+            spawns robot_controller + replay_record. The robot does NOT move
+            until POST /replay/begin releases the start gate.
+            """
+            if await state_manager.is_estop():
+                raise HTTPException(
+                    status_code=403, detail="Cannot start: E-Stop is active"
+                )
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            path = str(body.get("path", "")).strip()
+            if not path:
+                raise HTTPException(status_code=400, detail="Missing 'path'")
+            try:
+                info = inspect_episode(path)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400, detail=f"Not a valid episode: {exc}"
+                )
+            user_env = {
+                k: str(v) for k, v in (body.get("env") or {}).items() if v
+            }
+            # Mutual exclusion: kill everything (teleop or a previous replay).
+            if self._teleop_running or self._replay_running or self._procs:
+                self._stop_teleop_procs()
+            self._start_replay_procs(info, user_env)
+            return JSONResponse(content=await build_state_dict())
+
+        @app.post("/replay/begin")
+        async def replay_begin():
+            """Release the replay start gate — the robot starts moving.
+
+            Writes a newline to replay_record's stdin, firing its
+            "Press Enter to start" gate.
+            """
+            with self._replay_lock:
+                replay_state = self._replay_status.get("state")
+            proc = self._replay_proc
+            if not self._replay_running or proc is None or proc.stdin is None:
+                raise HTTPException(status_code=409, detail="Replay is not running")
+            if replay_state != "waiting":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Replay not waiting for begin (state={replay_state or 'unknown'})",
+                )
+            try:
+                proc.stdin.write("\n")
+                proc.stdin.flush()
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=500, detail=f"Failed to signal replay: {exc}"
+                )
+            return JSONResponse(content=await build_state_dict())
+
+        @app.post("/replay/stop")
+        async def replay_stop():
+            """Stop the replay subprocess stack.
+
+            Mirrors /teleop/stop's estop reset so the user can start again
+            cleanly afterwards.
+            """
+            self._stop_teleop_procs()
+            self._gui_estop = False
+            self._cmd_estop = False
+            await state_manager.clear_estop()
+            if self.robot and hasattr(self.robot, "estop"):
+                try:
+                    self.robot.estop.deactivate()
+                except Exception as exc:
+                    logger.warning(
+                        f"Hardware estop release during /replay/stop failed: {exc}"
+                    )
+            return JSONResponse(content=await build_state_dict())
 
         # -- Doctor actions (manual robot recovery from the UI) --
         #
@@ -1416,20 +1586,42 @@ class TeleopApp:
             return
         self._stop_in_progress = False
         self._proc_crashed.clear()
+    def _build_proc_env(self, user_env: Dict[str, str]) -> Dict[str, str]:
+        """Overlay user env overrides onto os.environ for subprocess launch.
 
+        Resolves ROBOT_NAME / ROBOT_CONFIG / ZENOH_CONFIG the same way for
+        teleop and replay stacks. Mutates ``user_env`` in place (resolved
+        values) and stores it as ``self._teleop_env`` for state reporting.
+
+        Blank fields fall back to the last successful launch's resolved env
+        (``self._last_launch_env``) before defaults kick in, so a replay
+        started without re-entering the robot/zenoh form reuses the same
+        robot connection the last teleop/replay used — avoiding a mismatched
+        auto-detected cert that can't reach the robot.
+        """
         env = os.environ.copy()
+        prev = self._last_launch_env
 
         # --- Resolve ROBOT_NAME ---
         if not user_env.get("ROBOT_NAME"):
-            # Fall back to whatever is already in the process environment
-            user_env.pop("ROBOT_NAME", None)  # let os.environ value pass through
+            if prev.get("ROBOT_NAME"):
+                user_env["ROBOT_NAME"] = prev["ROBOT_NAME"]
+            else:
+                # Fall back to whatever is already in the process environment
+                user_env.pop("ROBOT_NAME", None)  # let os.environ value pass through
 
         # --- Resolve ROBOT_CONFIG ---
         if not user_env.get("ROBOT_CONFIG"):
-            user_env["ROBOT_CONFIG"] = "vega_1u_gripper"
+            user_env["ROBOT_CONFIG"] = prev.get("ROBOT_CONFIG") or "vega_1u_gripper"
 
         # --- Resolve ZENOH_CONFIG ---
         zenoh_val = user_env.get("ZENOH_CONFIG", "").strip()
+        if not zenoh_val and prev.get("ZENOH_CONFIG"):
+            # Reuse the last launch's already-resolved absolute cert path.
+            # Write it back so it propagates into the resolved env below (it
+            # bypasses the resolve branches since it's already absolute).
+            zenoh_val = prev["ZENOH_CONFIG"]
+            user_env["ZENOH_CONFIG"] = zenoh_val
         zenoh_base = Path.home() / ".dexmate" / "comm" / "zenoh"
         if zenoh_val and not zenoh_val.startswith("/"):
             # Treat as a certificate name — resolve to a full path by trying
@@ -1458,6 +1650,60 @@ class TeleopApp:
 
         env.update(user_env)
         self._teleop_env = user_env  # store so we can report it in state
+        # Persist the resolved env across stop() so the next launch (teleop or
+        # replay) can reuse blank fields.
+        self._last_launch_env = dict(user_env)
+        return env
+
+    def _spawn_proc(
+        self,
+        cmd: List[str],
+        env: Dict[str, str],
+        use_stdin: bool = False,
+    ) -> Optional[subprocess.Popen]:
+        """Spawn one subprocess with log tailing; returns the Popen or None.
+
+        Derives a friendly name for logs/tabs. Two cases:
+          python /path/to/arm_reader.py ...             → "arm_reader"
+          python -m omniteleop.record.mcap_recorder ... → "mcap_recorder"
+        """
+        if cmd[1] == "-m" and len(cmd) > 2:
+            name = cmd[2].rsplit(".", 1)[-1]
+        else:
+            name = Path(cmd[1]).stem
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                env=env,
+                stdin=subprocess.PIPE if use_stdin else None,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                start_new_session=True,
+            )
+        except FileNotFoundError:
+            logger.error(f"Command not found: {name} — is omniteleop installed?")
+            return None
+        self._procs.append(proc)
+        self._proc_names.append(name)
+        with self._log_lock:
+            self._proc_logs[name] = []
+        threading.Thread(
+            target=self._tail_proc,
+            args=(proc, name),
+            daemon=True,
+            name=f"log-{name}",
+        ).start()
+        logger.info(f"Started: {' '.join(cmd)}  (pid={proc.pid})")
+        return proc
+
+    def _start_teleop_procs(self, user_env: Dict[str, str]):
+        """Spawn all teleop subprocesses with the given env overrides."""
+        if self._teleop_running:
+            return
+
+        env = self._build_proc_env(user_env)
 
         # Re-init StateChecker with ROBOT_NAME from env if provided
         robot_name = env.get("ROBOT_NAME", "")
@@ -1493,37 +1739,8 @@ class TeleopApp:
             cmd, pre_delay = entry
             if pre_delay > 0:
                 time.sleep(pre_delay)
-            # Derive a friendly name for logs/tabs. Two cases:
-            #   python /path/to/arm_reader.py ...      → "arm_reader"
-            #   python -m omniteleop.record.mcap_recorder ... → "mcap_recorder"
-            if cmd[1] == "-m" and len(cmd) > 2:
-                name = cmd[2].rsplit(".", 1)[-1]
-            else:
-                name = Path(cmd[1]).stem
-            try:
-                proc = subprocess.Popen(
-                    cmd,
-                    env=env,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    start_new_session=True,
-                )
-                self._procs.append(proc)
-                self._proc_names.append(name)
-                with self._log_lock:
-                    self._proc_logs[name] = []
-                threading.Thread(
-                    target=self._tail_proc,
-                    args=(proc, name),
-                    daemon=True,
-                    name=f"log-{name}",
-                ).start()
-                logger.info(f"Started: {' '.join(cmd)}  (pid={proc.pid})")
+            if self._spawn_proc(cmd, env) is not None:
                 spawned_any = True
-            except FileNotFoundError:
-                logger.error(f"Command not found: {name} — is omniteleop installed?")
 
         if not spawned_any:
             raise RuntimeError(
@@ -1721,6 +1938,151 @@ class TeleopApp:
             for proc, proc_name in zip(self._procs, self._proc_names)
         )
 
+    # =========================================================================
+    # Replay stack
+    # =========================================================================
+
+    def _list_episodes(self) -> List[Dict[str, Any]]:
+        """Scan the recorder save_dir for recorded episodes, newest first.
+
+        Episodes live either directly under save_dir or nested in
+        MM-DD-YYYY day folders (both recorders group by calendar day; legacy
+        flat episodes still show up). Format detection is by marker file
+        (transitions.pkl → mdp, episode.mcap → mcap).
+        """
+        recorder_cfg = self.config.get("recorder", {}) or {}
+        save_dir = Path(recorder_cfg.get("save_dir") or "recordings").expanduser()
+        if not save_dir.is_absolute():
+            # Same resolution rule as BaseRecorder: relative → under $HOME.
+            save_dir = Path.home() / save_dir
+
+        episodes: List[Dict[str, Any]] = []
+        if not save_dir.is_dir():
+            return episodes
+        try:
+            children = sorted(save_dir.iterdir())
+        except OSError:
+            return episodes
+        for child in children:
+            if not child.is_dir():
+                continue
+            fmt = detect_format(child)
+            if fmt:
+                candidates = [(child, fmt, "")]
+            else:
+                # Day folder — one level of nesting.
+                try:
+                    candidates = [
+                        (sub, sub_fmt, child.name)
+                        for sub in sorted(child.iterdir())
+                        if sub.is_dir() and (sub_fmt := detect_format(sub))
+                    ]
+                except OSError:
+                    continue
+            for d, d_fmt, day in candidates:
+                try:
+                    mtime = d.stat().st_mtime
+                except OSError:
+                    mtime = 0.0
+                episodes.append(
+                    {
+                        "name": d.name,
+                        "path": str(d),
+                        "format": d_fmt,
+                        "day": day,
+                        "mtime": mtime,
+                    }
+                )
+        episodes.sort(key=lambda e: e["mtime"], reverse=True)
+        return episodes
+
+    def _on_replay_status(self, data: Dict[str, Any]):
+        """Store the latest replay/status message from replay_record."""
+        if isinstance(data, dict):
+            with self._replay_lock:
+                self._replay_status = data
+
+    def _on_replay_frame(self, cam: str, data: bytes):
+        """Store the latest recorded-camera JPEG published by replay_record."""
+        if data:
+            with self._replay_lock:
+                self._replay_frames[cam] = bytes(data)
+
+    def _start_replay_procs(
+        self, episode_info: Dict[str, Any], user_env: Dict[str, str]
+    ):
+        """Spawn the replay stack: robot_controller → replay_record.
+
+        replay_record is spawned with stdin=PIPE and blocks at its
+        "Press Enter" gate until POST /replay/begin writes a newline — the
+        robot does not move before that.
+        """
+        env = self._build_proc_env(user_env)
+
+        _src = Path(__file__).parents[2]
+        ns_args = ["--namespace", self.namespace] if self.namespace else []
+        debug_args = ["--debug"] if self.debug else []
+
+        with self._replay_lock:
+            self._replay_status = {}
+            self._replay_frames = {}
+            self._replay_episode = dict(episode_info)
+
+        # Follower first — same rationale as VR mode: give robot_controller's
+        # Robot()/Zenoh init a head start before commands can arrive.
+        self._spawn_proc(
+            [
+                sys.executable,
+                str(_src / "follower" / "robot_controller.py"),
+                *ns_args,
+                *debug_args,
+            ],
+            env,
+        )
+        time.sleep(0.5)
+        self._replay_proc = self._spawn_proc(
+            [
+                sys.executable,
+                "-m",
+                "omniteleop.record.replay_record",
+                "--episode-path",
+                str(episode_info["path"]),
+                *ns_args,
+                *debug_args,
+            ],
+            env,
+            use_stdin=True,
+        )
+        self._replay_running = self._replay_proc is not None
+
+        # Subscribe to the replay status + per-camera JPEG topics. Subscribers
+        # persist on the shared node, so only subscribe to topics we haven't
+        # seen before (repeat replays reuse them; callbacks just overwrite the
+        # latest-value stores).
+        status_topic = self.config.get_topic("replay_status", "replay/status")
+        if status_topic not in self._replay_sub_topics:
+            self._node.create_subscriber(
+                status_topic,
+                callback=self._on_replay_status,
+                decoder=DictDataCodec.decode,
+            )
+            self._replay_sub_topics.add(status_topic)
+        for cam in episode_info.get("cameras", []):
+            video_topic = f"replay/video/{cam}"
+            if video_topic in self._replay_sub_topics:
+                continue
+            self._node.create_subscriber(
+                video_topic,
+                callback=(lambda data, _cam=cam: self._on_replay_frame(_cam, data)),
+            )
+            self._replay_sub_topics.add(video_topic)
+
+        logger.success(
+            f"Replay stack started: {episode_info['name']} "
+            f"({episode_info['format']}, {episode_info['num_frames']} frames "
+            f"@ {episode_info['rate_hz']}Hz)"
+        )
+
     def _stop_teleop_procs(self):
         """Terminate all teleop subprocesses and their entire process groups.
 
@@ -1786,6 +2148,13 @@ class TeleopApp:
         self.recorder_ready = False
         self.episode_dir_name = None
         self._recorder_ctrl_pub = None
+        # Reset replay mirror state — replay procs die with the rest.
+        self._replay_running = False
+        self._replay_proc = None
+        with self._replay_lock:
+            self._replay_status = {}
+            self._replay_frames = {}
+            self._replay_episode = {}
         # Reset align latch so the next teleop session runs the alignment
         # check from scratch.
         self._motion_started_signaled = False
@@ -1906,15 +2275,13 @@ class TeleopApp:
         try:
             robot_configs = get_robot_config()
             robot_configs.sensors["head_camera"].enabled = True
-            if (
-                self.record_components.get("left_wrist_rgb")
-                and "left_wrist_camera" in robot_configs.sensors
-            ):
+            # Enable the wrist cameras whenever the robot config has them, so the
+            # UI can view their streams (camera_3 / camera_4) regardless of
+            # whether wrist RGB recording is turned on. Recording is gated
+            # separately by the record components in the recorder subprocess.
+            if "left_wrist_camera" in robot_configs.sensors:
                 robot_configs.sensors["left_wrist_camera"].enabled = True
-            if (
-                self.record_components.get("right_wrist_rgb")
-                and "right_wrist_camera" in robot_configs.sensors
-            ):
+            if "right_wrist_camera" in robot_configs.sensors:
                 robot_configs.sensors["right_wrist_camera"].enabled = True
             self.robot = ReadOnlyRobot(configs=robot_configs)
             self._estop_control = SoftwareEStopControl(self.robot.robot_info)
@@ -1948,52 +2315,58 @@ class TeleopApp:
             )
             self._state_checker_thread.start()
 
-        if self.robot:
+        def get_frame(camera_id: str) -> bytes:
+            # Replay cameras: "replay_<camera>" ids serve the recorded
+            # JPEGs mirrored from the replay_record subprocess — no robot
+            # needed.
+            if camera_id.startswith("replay_"):
+                cam = camera_id[len("replay_"):]
+                with self._replay_lock:
+                    return self._replay_frames.get(cam, b"")
+            if not self.robot:
+                return b""
+            try:
+                camera_map = {
+                    "camera_1": ("head_camera", "left_rgb"),
+                    "camera_2": ("head_camera", "right_rgb"),
+                    # Wrist ZED X One cameras are single-stream: pass a
+                    # None obs_key so get_frame calls get_obs() without
+                    # obs_keys (that sensor takes include_timestamp, not
+                    # obs_keys). Only present when the wrist_camera sensors
+                    # are enabled; get_frame returns b"" otherwise.
+                    "camera_3": ("left_wrist_camera", None),
+                    "camera_4": ("right_wrist_camera", None),
+                }
+                if camera_id not in camera_map:
 
-            def get_frame(camera_id: str) -> bytes:
-                try:
-                    camera_map = {
-                        "camera_1": ("head_camera", "left_rgb"),
-                        "camera_2": ("head_camera", "right_rgb"),
-                        "left_wrist": ("left_wrist_camera", None),
-                        "right_wrist": ("right_wrist_camera", None),
-                    }
-                    if camera_id not in camera_map:
-                        return b""
-                    sensor_name, obs_key = camera_map[camera_id]
-                    sensor = getattr(self.robot.sensors, sensor_name, None)
-                    if not sensor:
-                        return b""
-                    obs = (
-                        sensor.get_obs(obs_keys=[obs_key])
-                        if obs_key
-                        else sensor.get_obs()
-                    )
-                    img = obs.get(obs_key) if isinstance(obs, dict) and obs_key else obs
-                    if isinstance(img, dict):
-                        img = img.get("data", img)
-                    if not isinstance(img, np.ndarray):
-                        return b""
-                    if (
-                        self.image_resolution
-                        and img.shape[:2] != self.image_resolution[::-1]
-                    ):
-                        img = cv2.resize(img, self.image_resolution)
-                    if len(img.shape) == 3 and img.shape[2] == 3:
-                        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                    jpeg_quality = (
-                        65
-                        if camera_id in {"left_wrist", "right_wrist"}
-                        else 85
-                    )
-                    _, buf = cv2.imencode(
-                        ".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality]
-                    )
-                    return buf.tobytes()
-                except Exception:
                     return b""
+                sensor_name, obs_key = camera_map[camera_id]
+                sensor = getattr(self.robot.sensors, sensor_name, None)
+                if not sensor:
+                    return b""
+                obs = (
+                    sensor.get_obs(obs_keys=[obs_key])
+                    if obs_key
+                    else sensor.get_obs()
+                )
+                img = obs.get(obs_key) if isinstance(obs, dict) and obs_key else obs
+                if isinstance(img, dict):
+                    img = img.get("data", img)
+                if not isinstance(img, np.ndarray):
+                    return b""
+                if (
+                    self.image_resolution
+                    and img.shape[:2] != self.image_resolution[::-1]
+                ):
+                    img = cv2.resize(img, self.image_resolution)
+                if len(img.shape) == 3 and img.shape[2] == 3:
+                    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                return buf.tobytes()
+            except Exception:
+                return b""
 
-            video_publisher.set_frame_callback(get_frame)
+        video_publisher.set_frame_callback(get_frame)
 
     def _state_checker_loop(self):
         prev_state = None

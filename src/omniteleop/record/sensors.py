@@ -38,6 +38,37 @@ class Reading:
     publish_ts_ns: int  # sensor-claimed capture time; 0 for synthetic/action
 
 
+def _obs_timestamp_ns(value: dict) -> int:
+    """Extract the sensor capture timestamp (ns) from a camera get_obs dict.
+
+    The dexcontrol camera get_obs(include_timestamp=True) return shape is not
+    uniform across transports: the Zenoh path passes the stream dict through
+    with a ``timestamp_ns`` key, while the RTC path wraps the frame as
+    ``{"data": ..., "timestamp": None}``. Accept either key (and a missing /
+    None value → 0) so recording never crashes on the timestamp lookup.
+    """
+    ts = value.get("timestamp_ns")
+    if ts is None:
+        ts = value.get("timestamp")
+    return int(ts) if ts is not None else 0
+
+
+def _component_timestamp_ns(part: Any) -> int:
+    """Best-effort sensor-capture timestamp (ns) for a joint/wrench component.
+
+    ``RobotComponent.get_timestamp_ns()`` does ``get_state()["timestamp_ns"]``,
+    which raises ``KeyError('timestamp_ns')`` when the driver's decoded state
+    message doesn't carry that key (varies by component / firmware). The
+    timestamp is only best-effort alignment metadata for the Reading, so a
+    failure must not abort the whole record-loop tick — fall back to 0 and let
+    the recorder's own tick timestamp stand in.
+    """
+    try:
+        return int(part.get_timestamp_ns())
+    except Exception:  # noqa: BLE001 — timestamp is best-effort metadata
+        return 0
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # State sensors — collect from the live robot.
 # ────────────────────────────────────────────────────────────────────────────
@@ -74,7 +105,7 @@ class JointStateSensor:
 
     def collect(self, robot: Any, keep: set[str]) -> list[Reading]:
         part = getattr(robot, self.component)
-        ts = int(part.get_timestamp_ns())
+        ts = _component_timestamp_ns(part)
         out: list[Reading] = []
         qpos_topic = f"/robot/state/{self.component}/qpos"
         if qpos_topic in keep:
@@ -128,7 +159,7 @@ class WrenchSensor:
     def collect(self, robot: Any, keep: set[str]) -> list[Reading]:
         sensor = getattr(robot, self._arm).wrench_sensor
         w = np.asarray(sensor.get_wrench_state(), dtype=np.float32)
-        ts = int(sensor.get_timestamp_ns())
+        ts = _component_timestamp_ns(sensor)
         out: list[Reading] = []
         force_topic = f"/robot/state/{self._hand}/wrench/force"
         torque_topic = f"/robot/state/{self._hand}/wrench/torque"
@@ -180,7 +211,7 @@ class HeadCamera:
             if value is None:
                 continue
             topic = self._MODALITY_TOPIC[mod]
-            ts = int(value["timestamp_ns"])
+            ts = _obs_timestamp_ns(value)
             payload = value["data"]
             if mod == "depth":
                 out.append(Reading(topic, payload, ts))

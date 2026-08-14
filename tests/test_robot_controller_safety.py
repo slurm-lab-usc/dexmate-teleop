@@ -129,6 +129,10 @@ def test_planned_waypoint_pauses_until_arm_catches_up() -> None:
     controller = controller_for(robot)
     controller.exit_requested = False
     controller.WAYPOINT_CATCHUP_TIMEOUT_SECONDS = 1.0
+    # The deployed tracking tolerance is 0.10 rad; the test's delayed arm
+    # trails by exactly 0.1, so pin a stricter tolerance to exercise the
+    # catch-up pause loop.
+    controller.TRAJECTORY_TRACKING_TOL_RAD = 0.05
 
     target = np.full(7, 0.1)
     reads = 0
@@ -205,6 +209,7 @@ def test_cleanup_holds_position_without_disable_or_estop() -> None:
     controller.exit_requested = False
     controller.subscriber = None
     controller.robot = CleanupRobot()
+    controller.has_torso = False
     controller.control_rate = 100.0
     controller.joint_publish_thread = None
     controller._debug_display = None
