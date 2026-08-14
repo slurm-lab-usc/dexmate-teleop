@@ -132,8 +132,8 @@ class CommandProcessor:
         self._init_pos_right_arm = init_pos_config.get("right_arm", [0.0] * 7)
 
         # Max allowed difference (rad) between exo and init_pos before motion
-        # starts. Kept in sync with StateChecker.INIT_POS_ALIGN_THRESHOLD (0.20).
-        self._align_threshold = 0.20
+        # starts. Kept in sync with StateChecker.INIT_POS_ALIGN_THRESHOLD (0.30).
+        self._align_threshold = 0.30
 
         # Initialize arms with robot-type-specific positions
         self.motion_manager.left_arm.set_joint_pos(
