@@ -1860,10 +1860,10 @@ class TeleopApp:
             "--interpolation-method",
             "none",
             "--no-arm-filter",
-            # Teleop has already aligned the leader to the robot's live pose;
-            # homing to init_pos would yank the arms away from it and the first
-            # leader command would snap them back (visible jump at start).
-            "--skip-homing",
+            # robot_controller homes to init_pos on startup; the joint-feedback
+            # publisher starts only after homing finishes, so the ALIGN gate
+            # (robot data comes from that topic) naturally waits for the robot
+            # to reach home before the operator aligns the leader to it.
         ]
         # Both leader stacks publish ready-to-send joint targets. Keep the
         # follower's real-time path explicit and identical in exoskeleton and
@@ -2376,13 +2376,17 @@ class TeleopApp:
         prev_state = None
         while self._state_checker_running and self.state_checker:
             try:
-                if self.robot:
-                    try:
-                        left = self.robot.left_arm.get_joint_pos().tolist()
-                        right = self.robot.right_arm.get_joint_pos().tolist()
-                        self.state_checker.update_robot_joints(left, right)
-                    except Exception:
-                        pass
+                # Robot joints come from robot_controller's robot/joints topic.
+                # The publisher only starts after initialize() finishes homing,
+                # so ALIGN naturally waits for the robot to reach home before
+                # offering a stable alignment reference. When the topic goes
+                # stale (robot_controller died), update_robot_joints stops and
+                # get_alignment_status surfaces the data age instead.
+                joints = self._latest_robot_joints.get("joints", {})
+                left = joints.get("left_arm") or []
+                right = joints.get("right_arm") or []
+                if left and right:
+                    self.state_checker.update_robot_joints(left, right)
                 robot_state = self.state_checker.get_state()
                 if robot_state != prev_state:
                     logger.info(
