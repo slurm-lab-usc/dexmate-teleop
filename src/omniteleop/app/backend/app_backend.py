@@ -1860,6 +1860,10 @@ class TeleopApp:
             "--interpolation-method",
             "none",
             "--no-arm-filter",
+            # Teleop has already aligned the leader to the robot's live pose;
+            # homing to init_pos would yank the arms away from it and the first
+            # leader command would snap them back (visible jump at start).
+            "--skip-homing",
         ]
         # Both leader stacks publish ready-to-send joint targets. Keep the
         # follower's real-time path explicit and identical in exoskeleton and

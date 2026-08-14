@@ -13,6 +13,9 @@ class FakeEStop:
     def activate(self) -> None:
         self.activations += 1
 
+    def deactivate(self) -> None:
+        self.activations -= 1
+
 
 class FakeArm:
     def __init__(
@@ -219,3 +222,54 @@ def test_cleanup_holds_position_without_disable_or_estop() -> None:
     controller.cleanup()
 
     assert events == ["hold", "robot_shutdown", "node_shutdown"]
+
+
+def test_skip_homing_keeps_robot_at_current_pose(monkeypatch) -> None:
+    """Real-time teleop must not yank the arms to init_pos after alignment."""
+    robot = FakeRobot(FakeArm(), FakeArm())
+    controller = controller_for(robot)
+    controller.skip_homing = True
+    controller.interpolation_method = "none"
+
+    homing_called = False
+    monkeypatch.setattr(controller, "_move_to_home", lambda: (_ for _ in ()).throw(AssertionError("homing must be skipped")))
+    mode_armed = []
+    estop_events = []
+    monkeypatch.setattr(controller, "_ensure_arms_in_position_mode", lambda: mode_armed.append(True))
+    monkeypatch.setattr(robot.estop, "deactivate", lambda: estop_events.append("deactivate"))
+    monkeypatch.setattr(robot.estop, "activate", lambda: estop_events.append("activate"))
+
+    controller._perform_homing()
+
+    assert homing_called is False
+    assert mode_armed == [True]
+    assert estop_events == ["deactivate", "activate"]
+
+
+def test_homing_runs_when_not_skipped(monkeypatch) -> None:
+    robot = FakeRobot(FakeArm(), FakeArm())
+    controller = controller_for(robot)
+    controller.skip_homing = False
+    controller.interpolation_method = "none"
+
+    homing_called = []
+    monkeypatch.setattr(controller, "_move_to_home", lambda: homing_called.append(True))
+
+    controller._perform_homing()
+
+    assert homing_called == [True]
+
+
+def test_homing_ruckig_path(monkeypatch) -> None:
+    robot = FakeRobot(FakeArm(), FakeArm())
+    controller = controller_for(robot)
+    controller.skip_homing = False
+    controller.interpolation_method = "ruckig"
+
+    calls = []
+    monkeypatch.setattr(controller, "_init_ruckig_generators", lambda: calls.append("init"))
+    monkeypatch.setattr(controller, "_move_to_home_with_ruckig", lambda: calls.append("move"))
+
+    controller._perform_homing()
+
+    assert calls == ["init", "move"]

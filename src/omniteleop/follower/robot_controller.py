@@ -70,6 +70,7 @@ class RobotController:
         publish_telemetry: bool = True,
         config_name: Optional[str] = None,
         no_arm_filter: bool = False,
+        skip_homing: bool = False,
     ) -> None:
         """Initialize robot controller.
 
@@ -82,6 +83,10 @@ class RobotController:
             publish_telemetry: Enable telemetry publishing for visualization.
             config_name: Name of the configuration file (without .yaml extension).
             no_arm_filter: If True, skip Butterworth filtering for left_arm and right_arm.
+            skip_homing: If True, keep the robot at its current pose instead of
+                moving to init_pos on startup. Used by real-time teleop, which
+                has already aligned the leader to the robot's live pose —
+                homing would yank the arms away from the aligned position.
 
         Note:
             Input rate, control rate, and input topic are loaded from config file.
@@ -108,6 +113,7 @@ class RobotController:
         self.history_size = history_size
         self.use_velocity_control = use_velocity_control
         self.no_arm_filter = no_arm_filter
+        self.skip_homing = skip_homing
 
         # Communication
         self.subscriber = None
@@ -313,15 +319,36 @@ class RobotController:
             logger.warning("Exit requested during initialization — skipping homing")
             return
 
+        self._perform_homing()
+
+        self._robot_mode = RobotMode.RUNNING
+
+        logger.success("Robot controller initialized")
+
+    def _perform_homing(self) -> None:
+        """Move to home unless real-time teleop asked to stay at the aligned pose.
+
+        Real-time teleop (``--skip-homing``) has already gone through the ALIGN
+        gate, which matches the leader to the robot's *live* pose. Homing to the
+        fixed ``init_pos`` would yank the arms away from that aligned position,
+        then the first leader command would snap them back — a visible jump at
+        start. Re-arm position mode (same as homing would) and stay put.
+        """
+        if self.skip_homing:
+            logger.info(
+                "Skipping homing — robot stays at its current (aligned) pose"
+            )
+            self.robot.estop.deactivate()
+            time.sleep(0.1)
+            self._ensure_arms_in_position_mode()
+            self.robot.estop.activate()
+            return
+
         if self.interpolation_method == "ruckig":
             self._init_ruckig_generators()
             self._move_to_home_with_ruckig()
         else:
             self._move_to_home()
-
-        self._robot_mode = RobotMode.RUNNING
-
-        logger.success("Robot controller initialized")
 
     def _ensure_arms_in_position_mode(self) -> None:
         """Re-arm both arms for position control before any homing motion.
@@ -1610,6 +1637,7 @@ def main(
     publish_telemetry: bool = False,
     config_name: Optional[str] = None,
     no_arm_filter: bool = False,
+    skip_homing: bool = False,
 ):
     """Main entry point for robot controller.
 
@@ -1624,6 +1652,8 @@ def main(
         publish_telemetry: Enable telemetry publishing for visualization.
         config_name: Config file name (without .yaml). Uses ROBOT_CONFIG env var if None.
         no_arm_filter: If True, skip Butterworth filtering for left_arm and right_arm.
+        skip_homing: Keep the robot at its current pose instead of moving to
+            init_pos on startup (real-time teleop with a pre-aligned pose).
     """
     # Setup logging
     logger = setup_logging(debug)
@@ -1639,6 +1669,7 @@ def main(
         publish_telemetry=publish_telemetry,
         config_name=config_name,
         no_arm_filter=no_arm_filter,
+        skip_homing=skip_homing,
     )
 
     # Installed before any hardware exists so a stop during Robot() init or
