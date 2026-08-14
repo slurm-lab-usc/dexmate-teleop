@@ -37,7 +37,11 @@ class StateChecker:
     # with CommandProcessor._align_threshold — CommandProcessor gates motion
     # on this criterion, and StateChecker reports ALIGN whenever the gate is
     # engaged so the UI shows "Aligning" while the robot is actually blocked.
-    INIT_POS_ALIGN_THRESHOLD: float = 1.0
+    #
+    # 0.20 rad (~11.5°) keeps the post-alignment jump well under the realtime
+    # tracking tolerance (0.30 rad); 1.0 rad (the 0.4.3 default) accepted a
+    # ~57° mismatch as "aligned" and produced a visible jump at start.
+    INIT_POS_ALIGN_THRESHOLD: float = 0.20
 
     # Joint limits for exoskeleton in radians, format: (min, max).
     JOINT_LIMITS: Dict[str, Tuple[float, float]] = {

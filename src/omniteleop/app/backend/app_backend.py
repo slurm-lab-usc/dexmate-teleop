@@ -1447,9 +1447,9 @@ class TeleopApp:
 
         @app.websocket("/ws/sensors/stream/{camera_id}")
         async def ws_camera(websocket: WebSocket, camera_id: str):
-            if await state_manager.is_estop():
-                await websocket.close(code=1008, reason="E-Stop active")
-                return
+            # Camera preview is a pure read-only stream (never commands the
+            # robot), so it stays available during E-Stop — the ALIGN phase
+            # needs live vision of the robot while E-Stop is still latched.
             await video_publisher.start_stream(websocket, camera_id)
 
         @app.websocket("/ws/logs")
