@@ -625,6 +625,9 @@ class TeleopApp:
                             error_data["component_errors"] = errors
                 elif control_state == "ALIGN":
                     error_data = self.state_checker.get_out_of_limit_joints()
+                    error_data["alignment"] = (
+                        self.state_checker.get_alignment_status()
+                    )
                     error_data["state"] = "ALIGN"
                 else:
                     error_data = {
@@ -1320,7 +1323,13 @@ class TeleopApp:
             async def serve_index():
                 _index = _frontend_dir / "index.html"
                 if _index.exists():
-                    return FileResponse(str(_index))
+                    # The UI is a single local HTML file and changes alongside
+                    # the backend. Prevent a browser 304/cache hit from hiding
+                    # newly added safety guidance after a restart.
+                    return FileResponse(
+                        str(_index),
+                        headers={"Cache-Control": "no-store"},
+                    )
                 raise HTTPException(status_code=404, detail="Frontend not found")
 
     # =========================================================================

@@ -19,14 +19,22 @@ def has_active_joint_error(value: Any) -> bool:
     if isinstance(value, Mapping):
         error_code = value.get("error_code")
         error_message = value.get("error_message")
+        severity = value.get("severity")
         if isinstance(error_code, Number) and error_code != 0:
             return True
-        if isinstance(error_message, str) and bool(error_message.strip()):
+        if isinstance(severity, Number) and severity != 0:
             return True
+        if isinstance(error_message, str) and bool(error_message.strip()):
+            # error_code == 0 and severity == 0 is a historical note — e.g. the
+            # motor rejected one out-of-limit command — not an active fault.
+            # Treating it as active crashes the controller on a fault that
+            # already self-resolved. Without a severity field, keep the old
+            # strict behaviour for other error sources.
+            return severity is None
         return any(
             has_active_joint_error(item)
             for key, item in value.items()
-            if key not in {"error_code", "error_message"}
+            if key not in {"error_code", "error_message", "severity"}
         )
     if isinstance(value, str):
         return bool(value.strip())

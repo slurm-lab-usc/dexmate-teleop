@@ -4,6 +4,7 @@ Determines the current operational state of the robot by checking network
 connectivity, topic availability, process status, and joint positions.
 """
 
+import math
 import os
 import subprocess
 import threading
@@ -113,6 +114,7 @@ class StateChecker:
         self._estop_subscriber = None
         self._exo_data: Dict[str, Optional[dict]] = {"data": None}
         self._exo_data_event = threading.Event()
+        self._last_exo_data_at: float = 0.0
         self._last_joycon_data_at: float = 0.0
         self._latest_estop_state: dict = {}
 
@@ -123,6 +125,7 @@ class StateChecker:
         # Latest robot joint positions, updated externally via update_robot_joints().
         self._robot_left_joints: List[float] = []
         self._robot_right_joints: List[float] = []
+        self._robot_joints_at: float = 0.0
 
         # Diagnosis details populated on each call to _check_active_conditions.
         self._diagnosis_details: dict = {}
@@ -178,6 +181,7 @@ class StateChecker:
 
             def on_exo_joints(data: dict) -> None:
                 self._exo_data["data"] = data
+                self._last_exo_data_at = time.monotonic()
                 self._exo_data_event.set()
 
             def on_joycon(data: dict) -> None:
@@ -683,32 +687,10 @@ class StateChecker:
         if self._motion_started_latch:
             return True
 
-        joint_angles = self.get_latest_exo_joints()
-        if joint_angles is None:
-            return False
-
-        left = joint_angles.get("left") or []
-        right = joint_angles.get("right") or []
-
-        if len(left) < 7 or len(right) < 7:
-            return False
-
-        left_ok = self._check_arm_joints_within_limits(left, is_left=True)
-        right_ok = self._check_arm_joints_within_limits(right, is_left=False)
-        if not (left_ok and right_ok):
-            return False
-
-        # Compare against robot's current joints, not config init_pos.
-        # If robot joints aren't available yet, stay in ALIGN (safe default).
-        robot_left = self._robot_left_joints
-        robot_right = self._robot_right_joints
-        if not robot_left or not robot_right:
-            return False
-
-        left_aligned = self._arm_within_threshold(left, robot_left)
-        right_aligned = self._arm_within_threshold(right, robot_right)
-
-        return left_aligned and right_aligned
+        # Keep the state transition and the UI guide on one source of truth.
+        # If the guide shows 14/14 ready, this check will pass on the same
+        # sample instead of duplicating subtly different criteria here.
+        return bool(self.get_alignment_status()["aligned"])
 
     def _arm_within_threshold(
         self, exo: List[float], ref: List[float]
@@ -754,6 +736,7 @@ class StateChecker:
         """
         self._robot_left_joints = left
         self._robot_right_joints = right
+        self._robot_joints_at = time.monotonic()
 
     def _check_exo_proximity_to_robot(self) -> bool:
         """Checks if exo joints are within ESTOP_ALIGN_THRESHOLD of robot joints.
@@ -811,6 +794,135 @@ class StateChecker:
                 out_of_limit = self._get_out_of_limit_details(joints, is_left)
                 if out_of_limit:
                     result[f"{side}_arm"] = out_of_limit
+
+        return result
+
+    def get_alignment_status(self) -> dict:
+        """Return non-blocking, per-joint guidance for the ALIGN UI.
+
+        The values and pass/fail criteria intentionally match
+        :meth:`_check_exo_joints_within_limits`: every exoskeleton joint must
+        be inside its configured hardware range and within
+        ``INIT_POS_ALIGN_THRESHOLD`` of the robot's current joint position.
+        ``target_delta`` is ``robot - exo``; a positive value tells the
+        operator to increase the displayed exoskeleton angle.
+        """
+        exo = self.get_latest_exo_joints()
+        robot = {
+            "left": self._robot_left_joints,
+            "right": self._robot_right_joints,
+        }
+        now = time.monotonic()
+        exo_at = getattr(self, "_last_exo_data_at", 0.0)
+        robot_at = getattr(self, "_robot_joints_at", 0.0)
+
+        result = {
+            "aligned": False,
+            "threshold_rad": self.INIT_POS_ALIGN_THRESHOLD,
+            "aligned_joints": 0,
+            "total_joints": 14,
+            "reason": "not_aligned",
+            "exo_data_age_sec": round(now - exo_at, 2) if exo_at else None,
+            "robot_data_age_sec": round(now - robot_at, 2) if robot_at else None,
+            "arms": {},
+        }
+
+        if exo is None:
+            result["reason"] = "exo_data_missing"
+        elif not robot["left"] or not robot["right"]:
+            result["reason"] = "robot_data_missing"
+
+        for side, is_left in (("left", True), ("right", False)):
+            exo_joints = (exo or {}).get(side) or []
+            robot_joints = robot[side] or []
+            joint_rows = []
+
+            for index, limit_key in enumerate(self._get_limit_keys(is_left)):
+                lo, hi = self.JOINT_LIMITS[limit_key]
+                exo_value = exo_joints[index] if index < len(exo_joints) else None
+                robot_value = (
+                    robot_joints[index] if index < len(robot_joints) else None
+                )
+                values_valid = (
+                    isinstance(exo_value, (int, float))
+                    and isinstance(robot_value, (int, float))
+                    and math.isfinite(float(exo_value))
+                    and math.isfinite(float(robot_value))
+                )
+
+                in_limits = (
+                    values_valid and lo <= float(exo_value) <= hi
+                )
+                target_delta = (
+                    float(robot_value) - float(exo_value)
+                    if values_valid
+                    else None
+                )
+                error = abs(target_delta) if target_delta is not None else None
+                aligned = bool(
+                    in_limits
+                    and error is not None
+                    and error <= self.INIT_POS_ALIGN_THRESHOLD
+                )
+                if aligned:
+                    result["aligned_joints"] += 1
+
+                if not values_valid:
+                    direction = "missing"
+                elif not in_limits:
+                    if float(exo_value) < lo:
+                        direction = "increase_to_limit"
+                    else:
+                        direction = "decrease_to_limit"
+                elif aligned:
+                    direction = "hold"
+                elif target_delta > 0:
+                    direction = "increase"
+                else:
+                    direction = "decrease"
+
+                joint_rows.append(
+                    {
+                        "joint": index + 1,
+                        "name": limit_key,
+                        "exo": round(float(exo_value), 4)
+                        if isinstance(exo_value, (int, float))
+                        and math.isfinite(float(exo_value))
+                        else None,
+                        "robot": round(float(robot_value), 4)
+                        if isinstance(robot_value, (int, float))
+                        and math.isfinite(float(robot_value))
+                        else None,
+                        "target_delta": round(target_delta, 4)
+                        if target_delta is not None
+                        else None,
+                        "error": round(error, 4) if error is not None else None,
+                        "limit_min": lo,
+                        "limit_max": hi,
+                        "in_limits": bool(in_limits),
+                        "aligned": aligned,
+                        "direction": direction,
+                    }
+                )
+
+            result["arms"][side] = {
+                "exo_count": len(exo_joints),
+                "robot_count": len(robot_joints),
+                "joints": joint_rows,
+            }
+
+        if result["reason"] not in {"exo_data_missing", "robot_data_missing"} and any(
+            arm["exo_count"] < 7 or arm["robot_count"] < 7
+            for arm in result["arms"].values()
+        ):
+            result["reason"] = (
+                "exo_data_incomplete"
+                if any(arm["exo_count"] < 7 for arm in result["arms"].values())
+                else "robot_data_incomplete"
+            )
+        elif result["aligned_joints"] == result["total_joints"]:
+            result["aligned"] = True
+            result["reason"] = "aligned"
 
         return result
 

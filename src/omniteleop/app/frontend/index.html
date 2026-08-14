@@ -168,6 +168,47 @@
   .c-green { color: #059669; } .c-gray { color: #71717a; }
   .c-red   { color: #dc2626; } .c-sky  { color: #0284c7; }
 
+  /* ── Exoskeleton alignment guide ── */
+  .align-guide { border-color: #7dd3fc; }
+  body.dark .align-guide { border-color: #075985; }
+  .align-guide-header {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  }
+  .align-progress {
+    border-radius: 999px; padding: 2px 9px; font-size: 11px; font-weight: 700;
+    background: #e0f2fe; color: #075985; white-space: nowrap;
+  }
+  body.dark .align-progress { background: #082f49; color: #7dd3fc; }
+  .align-help {
+    margin-bottom: 12px; padding: 9px 11px; border-radius: 7px;
+    background: #f0f9ff; color: #075985; font-size: 12px; line-height: 1.45;
+  }
+  body.dark .align-help { background: #082f49; color: #bae6fd; }
+  .align-arms { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .align-arm-title {
+    display: flex; justify-content: space-between; margin-bottom: 5px;
+    color: var(--text); font-size: 11px; font-weight: 700;
+  }
+  .align-table {
+    width: 100%; border-collapse: collapse; table-layout: fixed;
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 10px;
+  }
+  .align-table th, .align-table td {
+    padding: 5px 6px; border-bottom: 1px solid var(--border); text-align: right;
+    white-space: nowrap;
+  }
+  .align-table th { color: var(--text-muted); font-weight: 600; }
+  .align-table th:first-child, .align-table td:first-child { text-align: left; width: 34px; }
+  .align-table th:last-child, .align-table td:last-child { text-align: left; width: 150px; }
+  .align-row-ok td { color: #059669; background: rgba(16,185,129,.04); }
+  .align-row-move td:last-child { color: #0369a1; font-weight: 700; }
+  .align-row-limit td { color: #dc2626; background: rgba(239,68,68,.06); }
+  .align-row-missing td { color: var(--text-muted); }
+  .align-foot {
+    display: flex; gap: 14px; flex-wrap: wrap; padding-top: 9px;
+    color: var(--text-muted); font-size: 10px;
+  }
+
   /* ── Form elements ── */
   .field { display: flex; flex-direction: column; gap: 3px; }
   .field label { font-size: 11px; color: var(--text-muted); }
@@ -364,6 +405,8 @@
   @media (max-width: 600px) {
     .grid { grid-template-columns: 1fr; }
     main { padding: 12px; }
+    .align-arms { grid-template-columns: 1fr; }
+    .align-table th:last-child, .align-table td:last-child { width: 120px; }
     .doctor-brake-controls { grid-template-columns: 1fr; }
     .doctor-brake-status {
       grid-template-columns: minmax(280px, 1fr);
@@ -419,6 +462,24 @@
     <strong>Error:</strong>
     <span id="errorText"></span>
     <button class="error-close" id="errorClose">✕</button>
+  </div>
+
+  <!-- Shown at the top of the page during exoskeleton alignment. -->
+  <div class="card align-guide" id="alignGuideCard" style="display:none">
+    <div class="card-header">
+      <div class="align-guide-header">
+        <span class="card-title">Exoskeleton alignment — live joint guide</span>
+        <span class="align-progress" id="alignProgress">0 / 14 ready</span>
+      </div>
+    </div>
+    <div class="card-body">
+      <div class="align-help" id="alignHelp">
+        Move the two exoskeleton arms, not the JoyCons. Keep software E-Stop
+        active until all 14 joints are ready.
+      </div>
+      <div class="align-arms" id="alignArms"></div>
+      <div class="align-foot" id="alignFoot"></div>
+    </div>
   </div>
 
   <!-- 3-column grid -->
@@ -1209,6 +1270,93 @@
     left_hand:'Left Hand', right_hand:'Right Hand', chassis:'Chassis',
   };
 
+  function renderAlignmentGuide(cs, leaderMode) {
+    const card = el('alignGuideCard');
+    const visible = cs === 'ALIGN' && leaderMode === 'exoskeleton';
+    card.style.display = visible ? '' : 'none';
+    if (!visible) return;
+
+    const a = S.errorState?.alignment;
+    if (!a) {
+      el('alignProgress').textContent = 'waiting for diagnostics';
+      el('alignHelp').textContent =
+        'Move the two exoskeleton arms, not the JoyCons. Waiting for live alignment diagnostics…';
+      el('alignArms').innerHTML = '';
+      el('alignFoot').innerHTML = '';
+      return;
+    }
+
+    const ready = Number(a.aligned_joints || 0);
+    const total = Number(a.total_joints || 14);
+    el('alignProgress').textContent = `${ready} / ${total} ready`;
+
+    const reasonText = {
+      exo_data_missing:
+        'No exoskeleton joint data. Check arm_reader and /dev/ttyUSB0; moving the JoyCons cannot satisfy alignment.',
+      exo_data_incomplete:
+        'Exoskeleton data is incomplete. Both arms must report all 7 joints.',
+      robot_data_missing:
+        'No robot joint feedback. Check robot_controller and the robot/joints topic.',
+      robot_data_incomplete:
+        'Robot joint feedback is incomplete. Both arms must report all 7 joints.',
+      aligned:
+        'All joints are ready. Keep the exoskeleton still and wait for Paused, then toggle E-Stop once.',
+      not_aligned:
+        'Move the EXOSKELETON joints in the arrow direction. JoyCon position is not used for alignment.',
+    };
+    el('alignHelp').textContent = reasonText[a.reason] || reasonText.not_aligned;
+
+    const fmt = value =>
+      typeof value === 'number' && Number.isFinite(value) ? value.toFixed(3) : '—';
+    const actionText = joint => {
+      if (joint.direction === 'missing') return 'NO DATA';
+      if (joint.direction === 'hold') return '✓ HOLD';
+      if (joint.direction === 'increase_to_limit') {
+        return `↑ TO ≥ ${fmt(joint.limit_min)}`;
+      }
+      if (joint.direction === 'decrease_to_limit') {
+        return `↓ TO ≤ ${fmt(joint.limit_max)}`;
+      }
+      if (joint.direction === 'increase') return `↑ INCREASE ${fmt(joint.error)}`;
+      if (joint.direction === 'decrease') return `↓ DECREASE ${fmt(joint.error)}`;
+      return '—';
+    };
+    const rowClass = joint => {
+      if (joint.direction === 'missing') return 'align-row-missing';
+      if (!joint.in_limits) return 'align-row-limit';
+      if (joint.aligned) return 'align-row-ok';
+      return 'align-row-move';
+    };
+    const renderArm = (side, label) => {
+      const arm = a.arms?.[side] || { exo_count: 0, robot_count: 0, joints: [] };
+      const rows = (arm.joints || []).map(joint =>
+        `<tr class="${rowClass(joint)}">` +
+          `<td>J${Number(joint.joint)}</td>` +
+          `<td>${fmt(joint.exo)}</td>` +
+          `<td>${fmt(joint.robot)}</td>` +
+          `<td>${fmt(joint.target_delta)}</td>` +
+          `<td>${actionText(joint)}</td>` +
+        `</tr>`
+      ).join('');
+      const armReady = (arm.joints || []).filter(j => j.aligned).length;
+      return `<div><div class="align-arm-title"><span>${label} arm</span>` +
+        `<span>${armReady} / 7</span></div>` +
+        `<table class="align-table"><thead><tr><th>Joint</th><th>Exo</th>` +
+        `<th>Robot</th><th>Target Δ</th><th>Action</th></tr></thead>` +
+        `<tbody>${rows}</tbody></table></div>`;
+    };
+    el('alignArms').innerHTML =
+      renderArm('left', 'Left') + renderArm('right', 'Right');
+
+    const age = value =>
+      typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(1)} s` : 'unknown';
+    el('alignFoot').innerHTML =
+      `<span>Pass threshold: ≤ ${fmt(a.threshold_rad)} rad per joint</span>` +
+      `<span>Exo sample age: ${age(a.exo_data_age_sec)}</span>` +
+      `<span>Robot sample age: ${age(a.robot_data_age_sec)}</span>` +
+      `<span>Target Δ = Robot − Exo</span>`;
+  }
+
   function render(prevCs) {
     const { controlState: cs, isRecording, episodeId, softwareEstop, recordMode, teleopRunning, teleopLifecycle, activeComponents, leaderMode } = S;
 
@@ -1271,6 +1419,7 @@
     el('obsRobotBlock').style.display = leaderMode === 'vr_sim' ? 'none' : '';
     setObs('obsRobotLeft', S.robotLeft);
     setObs('obsRobotRight',S.robotRight);
+    renderAlignmentGuide(cs, leaderMode);
 
     // Sensors card is meaningless in vr_sim — no robot, no streams.
     el('sensorsCard').style.display = leaderMode === 'vr_sim' ? 'none' : '';

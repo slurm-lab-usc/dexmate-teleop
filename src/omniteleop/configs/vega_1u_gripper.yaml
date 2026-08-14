@@ -39,7 +39,7 @@ input_handlers:
     # Hand configuration (gripper - 2 predefined poses: open/close)
     hands:
       # Always-on proportional fine control from each JoyCon stick Y axis.
-      fine_max_speed: 0.15
+      fine_max_speed: 0.50
       fine_stick_deadzone: 0.15
       fine_max_dt: 0.10
       left:

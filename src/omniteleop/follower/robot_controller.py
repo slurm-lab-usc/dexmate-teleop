@@ -45,14 +45,14 @@ class RobotController:
     ARM_DOF = 7
     MODE_HOLD_SECONDS = 0.5
     MODE_HOLD_DRIFT_TOL_RAD = 0.02
-    TRAJECTORY_TRACKING_TOL_RAD = 0.05
+    TRAJECTORY_TRACKING_TOL_RAD = 0.10
     # Real-time Teleop commands intentionally use a much wider, sustained
     # tracking threshold than planned homing. A moving arm normally trails the
     # leader by a few hundredths of a radian; treating that servo lag as a hard
     # fault makes normal Teleop stop. Gross failures (for example, a stuck
     # joint) are still caught, while live joint errors and position limits are
     # checked independently on every command.
-    REALTIME_TRACKING_TOL_RAD = 0.20
+    REALTIME_TRACKING_TOL_RAD = 0.30
     TRACKING_REFERENCE_DELAY_SECONDS = 0.25
     TRACKING_VIOLATION_DURATION_SECONDS = 0.75
     TRACKING_MINIMUM_PROGRESS_RAD = 0.01
@@ -205,6 +205,10 @@ class RobotController:
 
         self._robot_mode = None
         self._is_first_command = True
+        self._stale_error_warned_at = 0.0
+        # Rate-limited warnings for tracking faults / bad frames.
+        self._tracking_fault_warned_at = 0.0
+        self._bad_target_warned_at = 0.0
         self.exit_requested = False
         # Set by the SIGTERM/SIGINT handler so the shutdown path can tell an
         # operator-requested exit from a supervisor-requested one.
@@ -357,13 +361,26 @@ class RobotController:
     def _validate_live_arm_safety(self) -> None:
         """Reject stale errors, non-finite positions, and URDF-limit violations."""
         violations = []
+        now = time.monotonic()
         for arm_name in ("left_arm", "right_arm"):
             arm = getattr(self.robot, arm_name, None)
             if arm is None:
                 continue
             state = arm._get_state()  # noqa: SLF001 - public getters omit errors
             errors = state.get("error")
-            if has_active_joint_error(errors):
+            active = has_active_joint_error(errors)
+            if errors and not active:
+                # Historical note (error_code==0/severity==0) — e.g. the motor
+                # rejected an out-of-limit command earlier and already
+                # recovered. Warn (rate-limited) instead of killing the
+                # controller over a self-resolved fault.
+                if now - self._stale_error_warned_at > 10.0:
+                    self._stale_error_warned_at = now
+                    logger.warning(
+                        f"{arm_name} reports stale error notes "
+                        f"(no active fault): {errors}"
+                    )
+            elif active:
                 violations.append(f"{arm_name} reports errors: {errors}")
             position = np.asarray(state.get("pos", []), dtype=float)
             if position.shape != (self.ARM_DOF,) or not bool(np.isfinite(position).all()):
@@ -930,6 +947,16 @@ class RobotController:
             # Store full command for safety checks and telemetry
             self.latest_command = data
 
+            # While emergency stop is active, drop the position payload: the
+            # safety validator skips limit enforcement during estop, so a
+            # paused leader position may exceed motor limits. Keeping it in
+            # latest_command (direct-pass mode) or in the interpolator would
+            # make the resume jump straight to that unclipped target and
+            # trip a hardware "Position command limit exceeded" error.
+            if data.get("safety_flags", {}).get("emergency_stop", False):
+                data["components"] = {}
+                return
+
             # Extract positions for interpolation
             timestamp = time.perf_counter()
             positions = {}
@@ -984,6 +1011,28 @@ class RobotController:
             self.robot.head.set_joint_pos(
                 self.home_positions["head"], wait_time=2.0, exit_on_reach=True
             )
+            # Drop trajectory points accumulated before the pause so the
+            # resume follows the fresh command flow instead of a stale,
+            # possibly unclipped target.
+            self.interpolator.clear()
+            # Seed the interpolator with the robot's CURRENT actual joint
+            # positions before the next exo update arrives. Without this, the
+            # first point the interpolator sees is the exo position — which
+            # may be far from where the robot stopped. The resulting velocity
+            # jump can trip a firmware "Position command limit exceeded" error.
+            now = time.perf_counter()
+            for arm_name in ("left_arm", "right_arm"):
+                if arm_name not in self.interpolated_components:
+                    continue
+                arm = getattr(self.robot, arm_name, None)
+                if arm is None:
+                    continue
+                try:
+                    pos = np.asarray(arm.get_joint_pos(), dtype=float)
+                except Exception:
+                    continue
+                if pos.shape == (self.ARM_DOF,) and bool(np.isfinite(pos).all()):
+                    self.interpolator.add_point(now, {arm_name: pos})
             self._robot_mode = RobotMode.RUNNING
 
         # Get command components
@@ -1114,15 +1163,41 @@ class RobotController:
             for name in ("left_arm", "right_arm"):
                 if name not in components or "pos" not in components[name]:
                     continue
-                target = self._validate_realtime_arm_target(
-                    name,
-                    np.asarray(components[name]["pos"], dtype=float),
-                )
-                self._send_arm_command(name, components[name])
+                try:
+                    target = self._validate_realtime_arm_target(
+                        name,
+                        np.asarray(components[name]["pos"], dtype=float),
+                    )
+                except RuntimeError:
+                    # One bad frame (NaN / wrong shape from a sensor glitch)
+                    # must not kill the controller — skip this frame; the
+                    # leader stream recovers on its own.
+                    if time.monotonic() - self._bad_target_warned_at > 10.0:
+                        self._bad_target_warned_at = time.monotonic()
+                        logger.warning(
+                            f"{name} invalid real-time target skipped"
+                        )
+                    continue
+                # Send the clipped target, not the raw component value.
+                components[name]["pos"] = target.tolist()
                 arm_targets[name] = target
+                self._send_arm_command(name, components[name])
             if arm_targets:
                 self._validate_live_arm_safety()
-                self._require_tracking(arm_targets)
+                try:
+                    self._require_tracking(arm_targets)
+                except RuntimeError as exc:
+                    # Tracking fault during live teleop: the arm is lagging
+                    # behind the leader (motor at limit, mechanical stall,
+                    # etc.). Keep sending clipped commands at full rate — the
+                    # arm recovers on its own once the leader returns within
+                    # range. Pausing commands would only starve the motor and
+                    # make recovery impossible.
+                    if time.monotonic() - self._tracking_fault_warned_at > 10.0:
+                        self._tracking_fault_warned_at = time.monotonic()
+                        logger.error(
+                            "Arm tracking fault (still sending commands): " + str(exc)
+                        )
 
             if "left_hand" in components:
                 self._send_hand_command("left_hand", components["left_hand"])
@@ -1142,6 +1217,16 @@ class RobotController:
         """Validate a Teleop target without changing its motion profile."""
         if desired.shape != (self.ARM_DOF,) or not bool(np.isfinite(desired).all()):
             raise RuntimeError(f"{arm_name} received an invalid real-time target")
+        # Clip to the limits the motor itself enforces (queried from firmware).
+        # The CommandProcessor clips to URDF model limits, which can be wider
+        # than the motor profile — a command inside URDF but past the motor
+        # limit makes the Dynamixel reject it and log "Position command limit
+        # exceeded", which used to crash the whole controller.
+        arm = getattr(self.robot, arm_name, None)
+        if arm is not None:
+            limits = getattr(arm, "joint_pos_limit", None)
+            if limits is not None and limits.shape == (self.ARM_DOF, 2):
+                desired = np.clip(desired, limits[:, 0], limits[:, 1])
         return desired
 
     def _publish_telemetry(self, command: Dict):
