@@ -23,14 +23,11 @@ mkdir -p ~/workspace/projects
 cd ~/workspace/projects
 
 # Teleoperation / data collection
-git clone -b merge/upstream-0.5.1 git@github.com:Buzzy0423/omniteleop.git
+git clone git@github.com:Buzzy0423/omniteleop.git
 
 # Policy rollout
 git clone git@github.com:Buzzy0423/robot-policy-deploy.git
 ```
-
-> For `omniteleop`, use the `merge/upstream-0.5.1` branch. The default `main`
-> branch is an older release.
 
 ## 2. Set Up the Conda Environment
 
@@ -154,5 +151,5 @@ docs.
 
 ## 9. Further Reading
 
-- [Dexmate Vega U Workstation Setup](https://github.com/Buzzy0423/omniteleop/blob/merge/upstream-0.5.1/docs/dexmate_vega_u_setup.md)
+- [Dexmate Vega U Workstation Setup](https://github.com/Buzzy0423/omniteleop/blob/main/docs/dexmate_vega_u_setup.md)
 - [robot-policy-deploy](https://github.com/Buzzy0423/robot-policy-deploy)
