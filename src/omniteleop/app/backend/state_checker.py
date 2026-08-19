@@ -38,10 +38,13 @@ class StateChecker:
     # on this criterion, and StateChecker reports ALIGN whenever the gate is
     # engaged so the UI shows "Aligning" while the robot is actually blocked.
     #
-    # 0.30 rad (~17°) keeps the post-alignment jump under the realtime
-    # tracking tolerance (0.30 rad); 1.0 rad (the 0.4.3 default) accepted a
-    # ~57° mismatch as "aligned" and produced a visible jump at start.
-    INIT_POS_ALIGN_THRESHOLD: float = 0.30
+    # 0.50 rad (~29°) trades a slightly larger start-up jump for an alignment
+    # pose the operator can actually hold by hand; 1.0 rad (the 0.4.3 default)
+    # accepted a ~57° mismatch as "aligned" and produced a visible jump at
+    # start. A jump beyond the realtime tracking tolerance (0.30 rad) is now
+    # absorbed by the stall recovery in RobotController rather than by keeping
+    # this gate tight.
+    INIT_POS_ALIGN_THRESHOLD: float = 0.50
 
     # Joint limits for exoskeleton in radians, format: (min, max).
     JOINT_LIMITS: Dict[str, Tuple[float, float]] = {

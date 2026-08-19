@@ -13,12 +13,14 @@ Usage:
 """
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
 import threading
 import time
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -264,6 +266,10 @@ class TeleopApp:
     # release_brake(False) may take 45 s, followed by the mode service timeout.
     ARM_HOLDER_STOP_GRACE_S = 70.0
     PROC_STOP_GRACE_S = 5.0
+    # A command-stream E-Stop request older than this has no live producer
+    # behind it. CommandProcessor publishes at 40 Hz, so this is many missed
+    # cycles, not a hiccup.
+    CMD_ESTOP_STALE_S = 2.0
 
     def __init__(
         self,
@@ -293,6 +299,15 @@ class TeleopApp:
         if not save_path.is_absolute():
             save_path = Path.home() / save_path
         self.save_dir = save_path
+        # Saved-episode-count index: day ("MM-DD-YYYY") → task_label → count.
+        # Persisted next to save_dir so totals survive backend restarts; updated
+        # on the recorder's "EPISODE SAVED" marker (discards never count).
+        self._record_counts_path = self.save_dir / ".record_counts.json"
+        self._record_counts: Dict[str, Dict[str, int]] = self._load_record_counts()
+        self._current_task_label: str = ""
+        # Metadata saved from the web UI and used as the default for JoyCon
+        # initiated recording (so L+R starts carry task label/instruction/etc).
+        self._pending_record_metadata: Dict[str, Any] = {}
         self.episode_prefix = recorder_cfg.get("episode_prefix", "episode")
         self.record_rate = recorder_cfg.get("record_rate", 20.0)
         resolution = recorder_cfg.get("image_resolution", [640, 480])
@@ -367,6 +382,14 @@ class TeleopApp:
         # Effective estop = gui_estop OR cmd_estop.
         self._gui_estop = False
         self._cmd_estop = False
+        # True while CommandProcessor is holding E-Stop because the exo drifted
+        # away from the robot during a pause and must be re-aligned.
+        self._cmd_pending_realign = False
+        # When the last robot_commands message arrived. Used to tell a live
+        # E-Stop request from one latched by a producer that has since exited.
+        self._last_command_at: Optional[float] = None
+        # Per-session subscribers on the shared node, retired between runs.
+        self._teleop_subs: List[Any] = []
 
         self.state_checker = None  # initialized in _start_teleop_procs
 
@@ -493,6 +516,15 @@ class TeleopApp:
             else:
                 control_state = "BOOT"
 
+            # A re-alignment hold outranks the mapping above. CommandProcessor
+            # is forcing E-Stop until the exo comes back to the robot's pose,
+            # so show ALIGN — PAUSE would tell the operator to just release the
+            # joycon, which does nothing here. get_alignment_status() below
+            # does not depend on the motion-started latch, so the per-joint
+            # guidance is live again without un-latching the state machine.
+            if self._cmd_pending_realign:
+                control_state = "ALIGN"
+
             # First time control_state reaches ACTIVE (estop released after
             # alignment), permanently latch the state_checker out of ALIGN.
             # This prevents ALIGN from re-appearing when the robot moves away
@@ -536,6 +568,11 @@ class TeleopApp:
                     "topic": "record_mode",
                     "data_type": "boolean",
                     "data": self.record_mode,
+                },
+                {
+                    "topic": "record_counts",
+                    "data_type": "json",
+                    "data": self._record_counts_status(),
                 },
                 {
                     "topic": "teleop_running",
@@ -986,6 +1023,7 @@ class TeleopApp:
             self._stop_teleop_procs()
             self._gui_estop = False
             self._cmd_estop = False
+            self._cmd_pending_realign = False
             await state_manager.clear_estop()
             if self.robot and hasattr(self.robot, "estop"):
                 try:
@@ -1349,6 +1387,7 @@ class TeleopApp:
             except Exception:
                 body = {}
             metadata = body.get("metadata") or {}
+            self._set_pending_record_metadata(metadata)
             self._recorder_ctrl_pub.publish(
                 {"command": "start", "metadata": metadata}
             )
@@ -1362,6 +1401,24 @@ class TeleopApp:
             self.recording_status = "recording"
             self.episode_dir_name = None  # set by the Directory: log line
             return JSONResponse(content=await build_state_dict())
+
+        @app.post("/record/metadata")
+        async def record_metadata(request: Request):
+            # This is allowed before record mode is enabled so the operator can
+            # pre-fill task metadata before launching teleop.
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            metadata = body.get("metadata") or {}
+            self._set_pending_record_metadata(metadata)
+            # Push the pending metadata to the recorder so a later JoyCon
+            # L+R start automatically carries these fields.
+            if self._recorder_ctrl_pub is not None:
+                self._recorder_ctrl_pub.publish(
+                    {"command": "set_metadata", "metadata": metadata}
+                )
+            return JSONResponse(content={"ok": True, "metadata": metadata})
 
         @app.post("/record/stop")
         async def record_stop(request: Request):
@@ -1420,14 +1477,30 @@ class TeleopApp:
                 raise HTTPException(status_code=409, detail="Not in emergency stop")
             self._gui_estop = False
             await self._sync_effective_estop()
+            if not self._cmd_estop_is_live():
+                # Nothing is producing commands any more (teleop exited, or the
+                # stack died). Drop the latched request so it cannot block this
+                # clear or the next session's.
+                self._cmd_estop = False
+                self._cmd_pending_realign = False
+                await self._sync_effective_estop()
             if self._cmd_estop:
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
+                # Two very different reasons land here. Say which one, or the
+                # operator has no way to know what action would clear it.
+                detail = (
+                    (
+                        "Exoskeleton drifted away from the robot while paused. "
+                        "Match the leader arms back to the robot pose (see the "
+                        "alignment guide) — E-Stop clears automatically once "
+                        "they are within range."
+                    )
+                    if self._cmd_pending_realign
+                    else (
                         "Command input still requests E-stop; "
                         "hardware E-stop remains active"
-                    ),
+                    )
                 )
+                raise HTTPException(status_code=409, detail=detail)
             try:
                 await self._set_software_estop(False)
             except Exception as exc:
@@ -1560,6 +1633,7 @@ class TeleopApp:
         # latched until the operator explicitly clears it.
         self._gui_estop = True
         self._cmd_estop = False
+        self._cmd_pending_realign = False
         await state_manager.estop()
         try:
             await self._set_software_estop(True)
@@ -1580,12 +1654,6 @@ class TeleopApp:
             self.robot.estop,
         )
 
-    def _start_teleop_procs(self, user_env: Dict[str, str]):
-        """Spawn all teleop subprocesses with the given env overrides."""
-        if self._teleop_running:
-            return
-        self._stop_in_progress = False
-        self._proc_crashed.clear()
     def _build_proc_env(self, user_env: Dict[str, str]) -> Dict[str, str]:
         """Overlay user env overrides onto os.environ for subprocess launch.
 
@@ -1703,6 +1771,14 @@ class TeleopApp:
         if self._teleop_running:
             return
 
+        # _stop_teleop_procs latches this and never clears it; the clearing
+        # lived in a duplicate definition of this method that Python discarded
+        # in favour of the later one. Left set, it permanently disables both
+        # the crash detection and the clean-exit detection in _tail_proc, so
+        # only the first joycon-initiated exit was ever noticed.
+        self._stop_in_progress = False
+        self._proc_crashed.clear()
+
         env = self._build_proc_env(user_env)
 
         # Re-init StateChecker with ROBOT_NAME from env if provided
@@ -1748,20 +1824,30 @@ class TeleopApp:
             )
         self._teleop_running = True
 
+        # Retire the previous session's endpoints before re-declaring them.
+        # These were created on every start and never released, so each
+        # start/stop cycle left another live subscriber on the shared node.
+        # (The replay path avoids this with its own _replay_sub_topics guard.)
+        self._retire_teleop_endpoints()
+
         # Subscribe to robot joint feedback published by robot_controller
         joints_topic = self.config.get_topic("robot_joints")
-        self._node.create_subscriber(
-            joints_topic,
-            callback=self._on_joints_received,
-            decoder=DictDataCodec.decode,
+        self._teleop_subs.append(
+            self._node.create_subscriber(
+                joints_topic,
+                callback=self._on_joints_received,
+                decoder=DictDataCodec.decode,
+            )
         )
 
         # Subscribe to robot commands — always (estop sync) + record mode (action tracking)
         commands_topic = self.config.get_topic("robot_commands")
-        self._node.create_subscriber(
-            commands_topic,
-            callback=self._on_command_received,
-            decoder=DictDataCodec.decode,
+        self._teleop_subs.append(
+            self._node.create_subscriber(
+                commands_topic,
+                callback=self._on_command_received,
+                decoder=DictDataCodec.decode,
+            )
         )
 
         # Publisher used by /record/start, /record/stop to drive the recorder
@@ -2087,6 +2173,26 @@ class TeleopApp:
             f"@ {episode_info['rate_hz']}Hz)"
         )
 
+    def _retire_teleop_endpoints(self) -> None:
+        """Release this session's subscribers/publishers on the shared node.
+
+        The node itself outlives every teleop session, so anything declared on
+        it per-session has to be shut down explicitly or it stays live for the
+        life of the backend.
+        """
+        for endpoint in self._teleop_subs:
+            try:
+                endpoint.shutdown()
+            except Exception:  # pylint: disable=broad-except
+                pass
+        self._teleop_subs.clear()
+        if self._recorder_ctrl_pub is not None:
+            try:
+                self._recorder_ctrl_pub.shutdown()
+            except Exception:  # pylint: disable=broad-except
+                pass
+            self._recorder_ctrl_pub = None
+
     def _stop_teleop_procs(self):
         """Terminate all teleop subprocesses and their entire process groups.
 
@@ -2151,7 +2257,9 @@ class TeleopApp:
         self.recording_status = "idle"
         self.recorder_ready = False
         self.episode_dir_name = None
-        self._recorder_ctrl_pub = None
+        # Drops the recorder control publisher too, so a stopped stack holds
+        # nothing on the shared node.
+        self._retire_teleop_endpoints()
         # Reset replay mirror state — replay procs die with the rest.
         self._replay_running = False
         self._replay_proc = None
@@ -2159,6 +2267,13 @@ class TeleopApp:
             self._replay_status = {}
             self._replay_frames = {}
             self._replay_episode = {}
+        # The command producers are gone, so any E-Stop request they left
+        # behind is stale by definition. Reset it here rather than in each
+        # caller — the callers that forgot are how a joycon-initiated exit
+        # ended up latching E-Stop into the next session.
+        self._cmd_estop = False
+        self._cmd_pending_realign = False
+        self._last_command_at = None
         # Reset align latch so the next teleop session runs the alignment
         # check from scratch.
         self._motion_started_signaled = False
@@ -2213,6 +2328,29 @@ class TeleopApp:
                 with self._log_lock:
                     self._proc_crashed[name] = rc
                 logger.error(f"{name} exited unexpectedly (code={rc})")
+            elif (
+                not is_recorder
+                and rc == 0
+                and name == self.ARM_HOLDER_PROC
+                and not self._stop_in_progress
+                and self._teleop_running
+            ):
+                # The operator ended the session from the joycon: R3+L3 sets
+                # exit_requested, which brings the stack down without ever
+                # touching the Stop endpoint. Nothing then reset the lifecycle,
+                # so reconnecting was refused with "Teleop already running"
+                # while the exit command's emergency_stop=True stayed latched
+                # in _cmd_estop. Run the same teardown the Stop button does.
+                # Keyed on the arm holder alone so the sibling tail threads do
+                # not each schedule a teardown.
+                logger.info(
+                    f"{name} exited cleanly — teleop session ended by operator"
+                )
+                loop = self._log_loop
+                if loop and loop.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        self._stop_teleop_background(), loop
+                    )
             if is_recorder:
                 self.recorder_ready = False
                 # Subprocess has exited (clean or crash). If we still think
@@ -2249,6 +2387,15 @@ class TeleopApp:
         if "RECORDER READY" in line:
             self.recorder_ready = True
             self.recording_status = "ready"
+            # If the operator pre-filled web UI metadata before launch, push
+            # it to the recorder now so JoyCon L+R starts carry it too.
+            if self._recorder_ctrl_pub is not None and self._pending_record_metadata:
+                self._recorder_ctrl_pub.publish(
+                    {
+                        "command": "set_metadata",
+                        "metadata": self._pending_record_metadata,
+                    }
+                )
         elif "RECORDING STARTED" in line:
             self.is_recording = True
             self.recording_status = "recording"
@@ -2256,6 +2403,7 @@ class TeleopApp:
         elif "EPISODE SAVED" in line:
             self.is_recording = False
             self.recording_status = "saved"
+            self._on_episode_saved()
         elif "EPISODE DISCARDED" in line:
             self.is_recording = False
             self.recording_status = "discarded"
@@ -2268,6 +2416,62 @@ class TeleopApp:
                 candidate = line[idx + len("Directory:") :].strip()
                 if candidate and candidate != "N/A":
                     self.episode_dir_name = candidate
+
+    # =========================================================================
+    # Saved-episode counts
+    # =========================================================================
+
+    def _load_record_counts(self) -> Dict[str, Dict[str, int]]:
+        """Load the persisted day→tag→count index, tolerating corruption."""
+        try:
+            if self._record_counts_path.is_file():
+                raw = json.loads(self._record_counts_path.read_text())
+                if isinstance(raw, dict):
+                    return {
+                        str(day): {
+                            str(tag): int(n)
+                            for tag, n in counts.items()
+                            if isinstance(n, (int, float))
+                        }
+                        for day, counts in raw.items()
+                        if isinstance(counts, dict)
+                    }
+        except (OSError, ValueError) as exc:
+            logger.warning(f"Ignoring unreadable record-count index: {exc}")
+        return {}
+
+    def _persist_record_counts(self) -> None:
+        """Write the day→tag→count index next to save_dir."""
+        try:
+            self.save_dir.mkdir(parents=True, exist_ok=True)
+            self._record_counts_path.write_text(
+                json.dumps(self._record_counts, indent=2)
+            )
+        except OSError as exc:
+            logger.warning(f"Could not persist record counts: {exc}")
+
+    def _on_episode_saved(self) -> None:
+        """Count one saved episode under the tag active at /record/start."""
+        day = datetime.now().strftime("%m-%d-%Y")
+        counts = self._record_counts.setdefault(day, {})
+        tag = self._current_task_label or ""
+        counts[tag] = counts.get(tag, 0) + 1
+        self._persist_record_counts()
+
+    def _set_pending_record_metadata(self, metadata: Dict[str, Any]) -> None:
+        """Remember web UI metadata for JoyCon-initiated recording."""
+        self._pending_record_metadata = dict(metadata or {})
+        self._current_task_label = str(metadata.get("task_label") or "")
+
+    def _record_counts_status(self) -> Dict[str, Any]:
+        """Status-card numbers: current-tag saved today + total saved today."""
+        day = datetime.now().strftime("%m-%d-%Y")
+        today = self._record_counts.get(day, {})
+        return {
+            "tag_label": self._current_task_label or "",
+            "tag_count": today.get(self._current_task_label or "", 0),
+            "today_total": sum(today.values()),
+        }
 
     # =========================================================================
     # Robot / StateChecker background loop
@@ -2505,11 +2709,33 @@ class TeleopApp:
         # every normal command (which carries emergency_stop=False) would
         # immediately undo a GUI-initiated E-Stop and flicker the button back.
         self._cmd_estop = estop_active
+        self._cmd_pending_realign = data.get("safety_flags", {}).get(
+            "pending_realign", False
+        )
+        self._last_command_at = now
         loop = self._log_loop
         if loop and loop.is_running():
             asyncio.run_coroutine_threadsafe(self._sync_effective_estop(), loop)
         # Note: recorder handles its own auto_stop_on_estop via its own
         # robot_commands subscriber (BaseRecorder._on_command_received).
+
+    def _cmd_estop_is_live(self) -> bool:
+        """True only when a running producer is still asserting E-Stop.
+
+        The last command published before teleop exits carries
+        emergency_stop=True — CommandProcessor forces it alongside
+        exit_requested — so _cmd_estop latches True and, with the producer
+        gone, no later message ever flips it back. A joycon R3+L3 exit
+        therefore left the operator permanently unable to clear E-Stop, since
+        the clear endpoint refuses while _cmd_estop is set. An E-Stop request
+        from a stream that stopped is not a live objection.
+        """
+        if not self._cmd_estop:
+            return False
+        last = self._last_command_at
+        return (
+            last is not None and (time.time() - last) <= self.CMD_ESTOP_STALE_S
+        )
 
     async def _sync_effective_estop(self):
         """Sync effective estop (gui OR command_processor) to state_manager."""

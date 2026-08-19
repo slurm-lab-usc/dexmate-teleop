@@ -1307,6 +1307,7 @@
     controlState: 'BOOT', isRecording: false, episodeId: null,
     softwareEstop: false, recordMode: false, teleopRunning: false,
     teleopLifecycle: 'stopped', errorState: null, activeComponents: [],
+    recordCounts: null,
   };
   // Per-path in-flight request tracking: a slow request only disables its own
   // button instead of freezing the whole UI, and concurrent requests can't
@@ -1406,6 +1407,7 @@
           controlState:    cs,
           episodeId:       get('episode_id') || null,
           recordMode:      get('record_mode') ?? false,
+          recordCounts:    get('record_counts') ?? null,
           teleopRunning:   get('teleop_running') ?? false,
           teleopLifecycle: get('teleop_lifecycle') ?? (get('teleop_running') ? 'running' : 'stopped'),
           errorState:      get('error_state') ?? null,
@@ -1454,7 +1456,13 @@
   // Shared WS-attach logic: `c` is a {ws, canvas, msg, status} entry, `id`
   // the backend stream id (camera_1…camera_4 or replay_<camera>).
   function openCamWs(c, id) {
-    if (c.ws?.readyState === WebSocket.OPEN) return;
+    // CONNECTING counts as "already opening". render() calls startCam on every
+    // state message, so treating only OPEN as idempotent meant each message
+    // tore down a socket still mid-handshake ("closed before the connection is
+    // established") and started another — the camera could never reach OPEN
+    // while state pushes outpaced the handshake.
+    const rs = c.ws?.readyState;
+    if (rs === WebSocket.OPEN || rs === WebSocket.CONNECTING) return;
     closeCamWs(c);
     let ws;
     try { ws = new WebSocket(`${toWs(apiUrl)}/ws/sensors/stream/${id}`); }
@@ -1486,7 +1494,7 @@
       c.status.textContent = 'Error';
       c.status.className = 'cam-inactive';
     };
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       if (c.ws !== ws) return;
       c.ws = null;
       // Unexpected close (camera died / backend restart): keep retrying so
@@ -1565,8 +1573,13 @@
   }
 
   function shouldStartCam(id, sensors = S.sensorTopics || {}, cs = S.controlState) {
+    // Also called from openCamWs's onclose, which serves replay_<camera> ids
+    // too. Those have no entry in cams, so reading .topic unguarded threw a
+    // TypeError and took out the whole close handler.
+    const cam = cams[id];
+    if (!cam) return false;
     const isWrist = id === 'left_wrist' || id === 'right_wrist';
-    const topicLive = sensors[cams[id].topic]?.live === true;
+    const topicLive = sensors[cam.topic]?.live === true;
     const controlActive = cs === 'ACTIVE' || cs === 'RECORD' || cs === 'ALIGN';
     return topicLive || (controlActive && !isWrist);
   }
@@ -1999,7 +2012,7 @@
   }
 
   function render(prevCs) {
-    const { controlState: cs, isRecording, episodeId, softwareEstop, recordMode, teleopRunning, teleopLifecycle, activeComponents, leaderMode } = S;
+    const { controlState: cs, isRecording, episodeId, softwareEstop, recordMode, recordCounts, teleopRunning, teleopLifecycle, activeComponents, leaderMode } = S;
 
     // Badge
     const [bc, bl] = BADGE[cs] || BADGE.BOOT;
@@ -2021,9 +2034,20 @@
     el('teleopVal').innerHTML =
       `<span class="sdot ${lifecycleLabel[0]}"></span>` +
       `<span class="${lifecycleLabel[1]}">${lifecycleLabel[2]}</span>`;
+    // Record row: counts of saved episodes (discards never count). With a task
+    // tag: "<tag> N saved · M today"; without one, the day total alone.
+    const rc = recordMode && recordCounts ? recordCounts : null;
+    const recCounts = rc
+      ? rc.tag_label
+        ? ` ${rc.tag_label}: ${rc.tag_count} saved · ${rc.today_total} today`
+        : ` ${rc.today_total} saved today`
+      : '';
     el('recordVal').innerHTML = recordMode
-      ? '<span class="sdot dot-sky"></span><span class="c-sky">On</span>'
+      ? `<span class="sdot dot-sky"></span><span class="c-sky">On</span><span class="c-gray">${recCounts}</span>`
       : '<span class="sdot dot-gray"></span><span class="c-gray">Off</span>';
+    el('recordVal').title = rc
+      ? `${rc.tag_label || 'no tag'} · ${rc.tag_count} saved today · ${rc.today_total} total today`
+      : '';
     el('estopVal').innerHTML = softwareEstop
       ? '<span class="sdot dot-red"></span><span class="c-red">Active</span>'
       : '<span class="sdot dot-gray"></span><span class="c-gray">Clear</span>';
@@ -2544,6 +2568,23 @@
       }, 3000);
     }
   };
+  // Keep the backend's pending metadata in sync while the operator types,
+  // so a later JoyCon L+R start still records the web UI tag/annotation.
+  let recMetaTimer = null;
+  const saveRecMeta = () => {
+    clearTimeout(recMetaTimer);
+    recMetaTimer = setTimeout(() => {
+      api('/record/metadata', 'POST', { metadata: {
+        operator:       el('recAnnotator').value.trim(),
+        task_label:     el('recTaskLabel').value.trim(),
+        task_instruction: el('recTaskDesc').value.trim(),
+      }}).catch(() => {});
+    }, 300);
+  };
+  ['recAnnotator', 'recTaskLabel', 'recTaskDesc'].forEach(id => {
+    el(id).addEventListener('input', saveRecMeta);
+  });
+
   el('recStartBtn').onclick   = () => {
     const operator = el('recAnnotator').value.trim();
     ls.set('rec_annotator', operator);  // sticky for the session

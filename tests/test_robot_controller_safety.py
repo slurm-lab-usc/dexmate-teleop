@@ -58,9 +58,14 @@ class FakeRobot:
 class FakeTrackingWatchdog:
     def __init__(self, failures: dict[str, float]) -> None:
         self.failures = failures
+        self.last_failure_details = {}
+        self.resets = 0
 
     def update(self, _targets, _actuals):
         return self.failures
+
+    def reset(self) -> None:
+        self.resets += 1
 
 
 def controller_for(robot: FakeRobot) -> RobotController:
@@ -68,6 +73,10 @@ def controller_for(robot: FakeRobot) -> RobotController:
     controller.robot = robot
     controller._validate_live_arm_safety = lambda: None
     controller._establish_current_pose_hold = lambda: None
+    # State normally seeded by __init__.
+    controller._bad_target_warned_at = 0.0
+    controller._tracking_fault_warned_at = 0.0
+    controller._tracking_recovery = set()
     return controller
 
 
@@ -114,6 +123,18 @@ def test_tracking_error_aborts_for_owner_to_park() -> None:
         controller._require_tracking({"left_arm": np.zeros(7)})
 
     assert robot.estop.activations == 0
+
+
+def test_tracking_error_names_the_arms_that_stalled() -> None:
+    """Recovery is armed from the exception, not from watchdog internals."""
+    robot = FakeRobot(FakeArm(position=[0.2] * 7), FakeArm())
+    controller = controller_for(robot)
+    controller._arm_tracking_watchdog = FakeTrackingWatchdog({"left_arm": 0.2})
+
+    with pytest.raises(RuntimeError) as excinfo:
+        controller._require_tracking({"left_arm": np.zeros(7)})
+
+    assert excinfo.value.arm_names == ("left_arm",)
 
 
 def test_tracking_within_tolerance_continues() -> None:
@@ -164,16 +185,146 @@ def test_planned_waypoint_pauses_until_arm_catches_up() -> None:
 
 
 def test_realtime_target_is_not_lead_or_speed_limited() -> None:
-    left = FakeArm()
+    """Normal Teleop must reach hardware untouched, however far the leader is.
+
+    Clamping around measured feedback caps the servo's following error and
+    with it joint velocity, which is exactly the sluggishness this path must
+    not have.
+    """
+    left = FakeArm(position=[0.0] * 7)
     controller = controller_for(FakeRobot(left, FakeArm()))
     controller.control_rate = 100.0
 
     desired = np.ones(7)
-    validated = controller._validate_realtime_arm_target(
-        "left_arm",
-        desired,
+    validated = controller._validate_realtime_arm_target("left_arm", desired)
+    target = controller._apply_tracking_recovery("left_arm", validated, left.position)
+
+    np.testing.assert_allclose(target, desired)
+    assert controller._tracking_recovery == set()
+
+
+def test_stalled_arm_is_stepped_toward_the_leader() -> None:
+    """A far-away leader must not produce a command the firmware rejects."""
+    left = FakeArm(position=[-0.309] * 7)
+    controller = controller_for(FakeRobot(left, FakeArm()))
+    controller._enter_tracking_recovery(["left_arm"])
+
+    # Reproduces the observed fault: leader 0.91 rad away from the arm.
+    desired = np.full(7, -1.222)
+    target = controller._apply_tracking_recovery("left_arm", desired, left.position)
+
+    step = RobotController.REALTIME_RECOVERY_STEP_RAD
+    np.testing.assert_allclose(target, np.full(7, -0.309 - step))
+    assert np.all(np.abs(target - left.position) <= step + 1e-9)
+
+
+def test_recovery_walks_in_then_releases_the_arm() -> None:
+    """Repeated cycles close the gap, then direct tracking resumes."""
+    left = FakeArm(position=[0.0] * 7)
+    controller = controller_for(FakeRobot(left, FakeArm()))
+    controller._arm_tracking_watchdog = FakeTrackingWatchdog({})
+    controller._enter_tracking_recovery(["left_arm"])
+
+    desired = np.full(7, 1.0)
+    for _ in range(10):
+        target = controller._apply_tracking_recovery(
+            "left_arm", desired, left.position
+        )
+        # Model an arm that actually reaches each accepted command.
+        left.position = np.asarray(target, dtype=float)
+
+    np.testing.assert_allclose(left.position, desired)
+    assert controller._tracking_recovery == set()
+
+
+def test_recovery_release_needs_a_gap_below_the_step() -> None:
+    """Exit threshold under the step size is what makes the walk converge."""
+    assert (
+        RobotController.REALTIME_RECOVERY_EXIT_RAD
+        < RobotController.REALTIME_RECOVERY_STEP_RAD
     )
-    np.testing.assert_allclose(validated, desired)
+
+
+def test_recovery_skipped_without_usable_feedback() -> None:
+    """Garbage feedback must not clamp the arm into place."""
+    left = FakeArm()
+    controller = controller_for(FakeRobot(left, FakeArm()))
+    controller._enter_tracking_recovery(["left_arm"])
+
+    desired = np.ones(7)
+    target = controller._apply_tracking_recovery(
+        "left_arm", desired, np.full(7, np.nan)
+    )
+
+    np.testing.assert_allclose(target, desired)
+    assert controller._tracking_recovery == set()
+
+
+def test_tracking_watchdog_sees_unclamped_leader_target() -> None:
+    """The watchdog must still be able to fire once the clamp is in place."""
+    left = FakeArm(position=[-0.309] * 7)
+    controller = controller_for(FakeRobot(left, FakeArm()))
+    controller.control_rate = 100.0
+
+    seen: dict[str, np.ndarray] = {}
+
+    class RecordingWatchdog:
+        def update(self, targets, _actuals):
+            seen.update(targets)
+            return {}
+
+    controller._arm_tracking_watchdog = RecordingWatchdog()
+    desired = np.full(7, -1.222)
+    controller._require_tracking({"left_arm": desired})
+
+    np.testing.assert_allclose(seen["left_arm"], desired)
+
+
+def send_controller_for(left: FakeArm, failures: dict[str, float]):
+    controller = controller_for(FakeRobot(left, FakeArm()))
+    controller.control_rate = 100.0
+    controller.has_base = False
+    controller.has_torso = False
+    controller.use_velocity_control = False
+    controller._arm_tracking_watchdog = FakeTrackingWatchdog(failures)
+    return controller
+
+
+def test_send_robot_command_passes_targets_through_while_tracking() -> None:
+    """No stall reported: hardware must receive the leader target verbatim."""
+    left = FakeArm(position=[0.0] * 7)
+    controller = send_controller_for(left, {})
+
+    desired = [1.0] * 7
+    controller._send_robot_command(
+        {"components": {"left_arm": {"pos": list(desired)}}}
+    )
+
+    assert len(left.commands) == 1
+    np.testing.assert_allclose(left.commands[0], np.full(7, 1.0))
+    assert controller._tracking_recovery == set()
+
+
+def test_send_robot_command_enters_recovery_on_a_reported_stall() -> None:
+    """A stall arms the stepping; the fault is reported, not raised."""
+    left = FakeArm(position=[-0.309] * 7)
+    controller = send_controller_for(left, {"left_arm": 0.91})
+
+    desired = [-1.222] * 7
+    command = {"components": {"left_arm": {"pos": list(desired)}}}
+    # First cycle detects the stall; the target still goes out unmodified.
+    controller._send_robot_command(command)
+    np.testing.assert_allclose(left.commands[0], np.full(7, -1.222))
+    assert controller._tracking_recovery == {"left_arm"}
+    # The controller keeps running: a tracking fault is logged, not raised.
+    assert controller._tracking_fault_warned_at > 0.0
+
+    # From the next cycle the command is stepped into the firmware's window.
+    controller._send_robot_command(
+        {"components": {"left_arm": {"pos": list(desired)}}}
+    )
+    step = RobotController.REALTIME_RECOVERY_STEP_RAD
+    np.testing.assert_allclose(left.commands[1], np.full(7, -0.309 - step))
 
 
 @pytest.mark.parametrize(

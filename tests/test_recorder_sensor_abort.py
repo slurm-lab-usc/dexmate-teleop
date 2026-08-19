@@ -91,6 +91,25 @@ class _FailingRecorder(BaseRecorder):
         self.finalized.append(success)
 
 
+class _CaptureMetadataRecorder(BaseRecorder):
+    def __init__(self) -> None:
+        super().__init__()
+        self.captured_metadata = None
+
+    def _setup_storage(self, metadata) -> None:
+        self.captured_metadata = metadata
+        self.episode_dir = Path("/tmp/fake-capture-metadata-episode")
+
+    def _collect_observation(self):
+        return {"joint_pos": {}}
+
+    def _write_frame(self, *_args) -> None:
+        pass
+
+    def _finalize_storage(self, success: bool) -> None:
+        pass
+
+
 def test_required_sensor_failure_auto_discards_without_self_join_deadlock() -> None:
     recorder = _FailingRecorder()
     recorder.start_episode()
@@ -117,3 +136,28 @@ def test_toggle_command_uses_recorder_as_authoritative_state() -> None:
     recorder.is_recording = True
     recorder._on_control_received({"command": "toggle", "metadata": {"run": 2}})
     assert calls[-1] == ("stop", {})
+
+
+def test_pending_metadata_is_merged_into_joycon_start() -> None:
+    recorder = _CaptureMetadataRecorder()
+    recorder._on_control_received(
+        {
+            "command": "set_metadata",
+            "metadata": {"task_label": "pick_cup", "operator": "alice"},
+        }
+    )
+    recorder._on_control_received(
+        {
+            "command": "toggle",
+            "metadata": {"source": "joycon", "timestamp": 123},
+        }
+    )
+
+    assert recorder.captured_metadata == {
+        "task_label": "pick_cup",
+        "operator": "alice",
+        "source": "joycon",
+        "timestamp": 123,
+    }
+
+    recorder.end_episode()

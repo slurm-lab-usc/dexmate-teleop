@@ -172,6 +172,36 @@ def test_recording_chord_toggles_once_only_after_both_buttons_release(
     assert controller.get_recording_command() is None
 
 
+def test_discard_chord_requests_discard_without_toggling_torso(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ROBOT_CONFIG", "vega_1u_gripper")
+    controller = JoyConController(
+        {
+            "hands": {
+                "left": {"poses": {"open": [0.78], "close": [0.0]}},
+                "right": {"poses": {"open": [0.78], "close": [0.0]}},
+            },
+            "button_timings": {
+                "default_debounce": 0.0,
+                "discard_hold_duration": 0.0,
+            },
+        }
+    )
+    controller.estop_active = False
+    chord = _joycon_state(
+        left_buttons={"zl": True},
+        right_buttons={"zr": True},
+    )
+
+    controller.process(chord)
+    controller.process(chord)
+
+    assert controller.get_recording_command() == "discard"
+    assert controller.get_recording_command() is None
+    assert controller.get_activation_states()["torso"] is False
+
+
 class _RobotInfo:
     def get_component_joints(self, component: str) -> list[str]:
         assert component == "left_hand"

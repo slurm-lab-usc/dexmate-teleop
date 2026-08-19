@@ -132,8 +132,8 @@ class CommandProcessor:
         self._init_pos_right_arm = init_pos_config.get("right_arm", [0.0] * 7)
 
         # Max allowed difference (rad) between exo and init_pos before motion
-        # starts. Kept in sync with StateChecker.INIT_POS_ALIGN_THRESHOLD (0.30).
-        self._align_threshold = 0.30
+        # starts. Kept in sync with StateChecker.INIT_POS_ALIGN_THRESHOLD (0.50).
+        self._align_threshold = 0.50
 
         # Initialize arms with robot-type-specific positions
         self.motion_manager.left_arm.set_joint_pos(
@@ -180,6 +180,11 @@ class CommandProcessor:
         # to current robot joint positions before resuming motion.
         self._estop_was_active = False
         self._pending_realign = False
+        # Robot joint feedback older than this is treated as no feedback at
+        # all by the alignment checks, so a dead robot_controller cannot let
+        # motion resume against a frozen snapshot of the robot's pose.
+        self._robot_joints_max_age_s = 1.0
+        self._robot_joints_at: Optional[float] = None
         self._last_align_log: Dict[str, float] = {}  # suppress repeated align warnings
 
         # Set up subscribers and publishers through Dexcomm Node
@@ -379,6 +384,7 @@ class CommandProcessor:
         try:
             with self._robot_joints_lock:
                 self.latest_robot_joints = robot_joints_data
+                self._robot_joints_at = time.monotonic()
             if self.latest_robot_joints:
                 self._robot_joint_data_initialized = True
         except Exception as e:
@@ -493,6 +499,30 @@ class CommandProcessor:
         # release).
         if self._align_checked and not self._post_align_estop_seen:
             command.safety_flags.emergency_stop = True
+
+        # ── Re-alignment after an E-Stop pause ──────────────────────────
+        # _align_checked latches for the whole session, so on its own the
+        # first tick after an E-Stop release commands wherever the leader
+        # drifted to while the robot sat frozen. That step lands outside the
+        # window the arm firmware accepts around the present position, the
+        # command is rejected, and because the arm never moves every later
+        # command is rejected too — a deadlock that clearing the error does
+        # not fix. Re-run the same proximity check the initial gate uses and
+        # hold E-Stop until the operator brings the leader back to the
+        # robot's live pose.
+        estop_now = command.safety_flags.emergency_stop
+        if estop_now and not self._estop_was_active:
+            self._pending_realign = True
+        self._estop_was_active = estop_now
+
+        if self._pending_realign and not estop_now:
+            if self._is_exo_aligned_with_robot(command):
+                self._pending_realign = False
+                self._sync_motion_manager_to_robot_state()
+                logger.success("Exo re-aligned after E-Stop — resuming motion.")
+            else:
+                command.safety_flags.emergency_stop = True
+                self._estop_was_active = True
 
         # ── Motion control start (standard path) ────────────────────────
         if command.safety_flags.emergency_stop:
@@ -630,6 +660,11 @@ class CommandProcessor:
             "safety_flags": {
                 "emergency_stop": command.safety_flags.emergency_stop,
                 "exit_requested": command.safety_flags.exit_requested,
+                # Distinguishes "the operator is holding E-Stop" from "the
+                # re-alignment gate is holding it". Without this the UI cannot
+                # explain why releasing the joycon does not resume motion, and
+                # the E-Stop clear button just reports a generic refusal.
+                "pending_realign": self._pending_realign,
             },
         }
 
@@ -716,8 +751,23 @@ class CommandProcessor:
             robot_joints_snapshot = (
                 self.latest_robot_joints.copy() if self.latest_robot_joints else None
             )
+            received_at = self._robot_joints_at
 
-        if robot_joints_snapshot is None:
+        if robot_joints_snapshot is None or received_at is None:
+            return False
+
+        # A frozen snapshot from a dead robot_controller must not read as
+        # "aligned" — that would resume motion against an unknown robot pose.
+        age = time.monotonic() - received_at
+        if age > self._robot_joints_max_age_s:
+            key = "stale_feedback"
+            if abs(age - self._last_align_log.get(key, -999)) > 0.5:
+                self._last_align_log[key] = age
+                logger.warning(
+                    f"[ALIGN] robot joint feedback is {age:.1f}s old "
+                    f"(max {self._robot_joints_max_age_s:.1f}s) — cannot verify "
+                    "alignment"
+                )
             return False
 
         joint_data = robot_joints_snapshot.get("joints", {})

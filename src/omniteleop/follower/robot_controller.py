@@ -7,7 +7,7 @@ import sys
 import time
 import numpy as np
 import ruckig
-from typing import Optional, Dict, List
+from typing import Iterable, Optional, Dict, List
 import tyro
 from enum import Enum
 
@@ -33,6 +33,18 @@ from dexbot_utils import RobotInfo
 from dexcomm.codecs import DictDataCodec
 
 
+class ArmTrackingError(RuntimeError):
+    """Sustained arm tracking failure, naming the arms responsible.
+
+    Subclasses RuntimeError so existing ``except RuntimeError`` handlers on the
+    homing path keep working unchanged.
+    """
+
+    def __init__(self, message: str, arm_names: Iterable[str] = ()) -> None:
+        super().__init__(message)
+        self.arm_names = tuple(arm_names)
+
+
 class RobotMode(Enum):
     RUNNING = "running"
     STOP = "stop"
@@ -53,6 +65,29 @@ class RobotController:
     # joint) are still caught, while live joint errors and position limits are
     # checked independently on every command.
     REALTIME_TRACKING_TOL_RAD = 0.30
+    # Deadlock recovery, NOT a general command filter.
+    #
+    # The arm firmware rejects a whole position command that sits too far from
+    # the present position ("Position command limit exceeded"), and a rejected
+    # command leaves the arm exactly where it was — which keeps the next
+    # command just as far away. That deadlock cannot clear itself, and clearing
+    # the latched error does nothing because the next cycle recreates it.
+    #
+    # Clamping every target into a window around measured feedback does break
+    # the deadlock, but it must never run during normal Teleop: a position
+    # servo only moves because the measurement trails the command, so capping
+    # that trailing error at W caps joint velocity at roughly Kp*W. With
+    # REALTIME_TRACKING_TOL_RAD at 0.30 the normal following error already
+    # approaches 0.30, so any comparable window rubber-bands the follower.
+    #
+    # So the clamp engages per-arm only after the tracking watchdog reports a
+    # sustained stall (error over tolerance with under
+    # TRACKING_MINIMUM_PROGRESS_RAD of progress for
+    # TRACKING_VIOLATION_DURATION_SECONDS) and releases again once the arm has
+    # walked back to within REALTIME_RECOVERY_EXIT_RAD of the leader. Outside
+    # recovery the leader target is sent through untouched.
+    REALTIME_RECOVERY_STEP_RAD = 0.20
+    REALTIME_RECOVERY_EXIT_RAD = 0.15
     TRACKING_REFERENCE_DELAY_SECONDS = 0.25
     TRACKING_VIOLATION_DURATION_SECONDS = 0.75
     TRACKING_MINIMUM_PROGRESS_RAD = 0.01
@@ -215,6 +250,8 @@ class RobotController:
         # Rate-limited warnings for tracking faults / bad frames.
         self._tracking_fault_warned_at = 0.0
         self._bad_target_warned_at = 0.0
+        # Arms currently being walked back to the leader after a stall.
+        self._tracking_recovery: set[str] = set()
         self.exit_requested = False
         # Set by the SIGTERM/SIGINT handler so the shutdown path can tell an
         # operator-requested exit from a supervisor-requested one.
@@ -930,11 +967,28 @@ class RobotController:
             }
         return str(formatted)
 
-    def _require_tracking(self, targets: Dict[str, np.ndarray]) -> None:
+    def _require_tracking(
+        self,
+        targets: Dict[str, np.ndarray],
+        actuals: Optional[Dict[str, np.ndarray]] = None,
+    ) -> None:
+        """Fail when an arm stops making progress toward its leader target.
+
+        Args:
+            targets: Leader targets per arm. Callers on the real-time path pass
+                the unclamped leader targets so a stuck joint is still caught.
+            actuals: Measured positions already sampled this cycle. Read from
+                the arms when omitted.
+        """
+        sampled = actuals or {}
         actuals = {
-            name: np.asarray(
-                getattr(self.robot, name).get_joint_pos(),
-                dtype=float,
+            name: (
+                sampled[name]
+                if name in sampled
+                else np.asarray(
+                    getattr(self.robot, name).get_joint_pos(),
+                    dtype=float,
+                )
             )
             for name in targets
         }
@@ -949,9 +1003,10 @@ class RobotController:
             self._arm_tracking_watchdog = watchdog
         errors = watchdog.update(targets, actuals)
         if errors:
-            raise RuntimeError(
+            raise ArmTrackingError(
                 "Arm trajectory tracking failed: "
-                + self._format_tracking_failures(watchdog, errors)
+                + self._format_tracking_failures(watchdog, errors),
+                errors,
             )
 
     def _format_tracking_failures(
@@ -1281,18 +1336,25 @@ class RobotController:
             if "head" in components:
                 self._send_head_command(components["head"])
 
-            # Match the original real-time Teleop behavior: validated leader
-            # targets are sent directly. Clamping every target around measured
-            # feedback creates an implicit speed limit and makes the follower
-            # feel sluggish. CommandProcessor still enforces collision and
-            # joint limits; hardware state and gross sustained tracking faults
-            # remain checked below.
+            # Validated leader targets are sent directly. Clamping every target
+            # around measured feedback would cap the servo's following error
+            # and with it joint velocity, which is what makes a follower feel
+            # sluggish — so the clamp is reserved for arms the watchdog has
+            # found stalled (see _apply_tracking_recovery). CommandProcessor
+            # still enforces collision and joint limits; hardware state and
+            # gross sustained tracking faults remain checked below.
+            #
+            # The watchdog is fed the leader targets, never the recovery-
+            # clamped ones: a clamped command sits inside the recovery window
+            # by construction, so checking against it would stop the watchdog
+            # from ever firing and hide a genuinely stuck joint.
             arm_targets: dict[str, np.ndarray] = {}
+            arm_measured: dict[str, np.ndarray] = {}
             for name in ("left_arm", "right_arm"):
                 if name not in components or "pos" not in components[name]:
                     continue
                 try:
-                    target = self._validate_realtime_arm_target(
+                    desired = self._validate_realtime_arm_target(
                         name,
                         np.asarray(components[name]["pos"], dtype=float),
                     )
@@ -1306,21 +1368,30 @@ class RobotController:
                             f"{name} invalid real-time target skipped"
                         )
                     continue
-                # Send the clipped target, not the raw component value.
+                arm = getattr(self.robot, name, None)
+                measured = (
+                    np.asarray(arm.get_joint_pos(), dtype=float)
+                    if arm is not None
+                    else None
+                )
+                target = self._apply_tracking_recovery(name, desired, measured)
+                # Send the recovery-stepped target, not the raw component value.
                 components[name]["pos"] = target.tolist()
-                arm_targets[name] = target
+                arm_targets[name] = desired
+                if measured is not None:
+                    arm_measured[name] = measured
                 self._send_arm_command(name, components[name])
             if arm_targets:
                 self._validate_live_arm_safety()
                 try:
-                    self._require_tracking(arm_targets)
+                    self._require_tracking(arm_targets, arm_measured)
                 except RuntimeError as exc:
-                    # Tracking fault during live teleop: the arm is lagging
-                    # behind the leader (motor at limit, mechanical stall,
-                    # etc.). Keep sending clipped commands at full rate — the
-                    # arm recovers on its own once the leader returns within
-                    # range. Pausing commands would only starve the motor and
-                    # make recovery impossible.
+                    # Sustained tracking fault: the arm is not making progress
+                    # toward the leader. Commands keep flowing at full rate —
+                    # pausing them would only starve the motor — but from the
+                    # next cycle they are stepped toward the arm's measured
+                    # position so the firmware stops rejecting them outright.
+                    self._enter_tracking_recovery(getattr(exc, "arm_names", ()))
                     if time.monotonic() - self._tracking_fault_warned_at > 10.0:
                         self._tracking_fault_warned_at = time.monotonic()
                         logger.error(
@@ -1342,20 +1413,81 @@ class RobotController:
         arm_name: str,
         desired: np.ndarray,
     ) -> np.ndarray:
-        """Validate a Teleop target without changing its motion profile."""
+        """Validate a Teleop target without changing its motion profile.
+
+        No joint-limit clipping happens here: ``arm.joint_pos_limit`` is the
+        URDF limit set (``RobotInfo.get_joint_pos_limits``), and dexcontrol's
+        ``Arm.set_joint_pos`` already clips against exactly that array, so
+        repeating it would be a no-op. CommandProcessor enforces the same
+        limits upstream.
+        """
         if desired.shape != (self.ARM_DOF,) or not bool(np.isfinite(desired).all()):
             raise RuntimeError(f"{arm_name} received an invalid real-time target")
-        # Clip to the limits the motor itself enforces (queried from firmware).
-        # The CommandProcessor clips to URDF model limits, which can be wider
-        # than the motor profile — a command inside URDF but past the motor
-        # limit makes the Dynamixel reject it and log "Position command limit
-        # exceeded", which used to crash the whole controller.
-        arm = getattr(self.robot, arm_name, None)
-        if arm is not None:
-            limits = getattr(arm, "joint_pos_limit", None)
-            if limits is not None and limits.shape == (self.ARM_DOF, 2):
-                desired = np.clip(desired, limits[:, 0], limits[:, 1])
         return desired
+
+    def _apply_tracking_recovery(
+        self,
+        arm_name: str,
+        desired: np.ndarray,
+        measured: Optional[np.ndarray],
+    ) -> np.ndarray:
+        """Walk a stalled arm back toward the leader; pass through otherwise.
+
+        Only arms placed in recovery by :meth:`_enter_tracking_recovery` are
+        touched. For those, the target is clamped to
+        ``measured ± REALTIME_RECOVERY_STEP_RAD`` so the firmware accepts the
+        command instead of rejecting it outright; successive cycles close the
+        gap. Recovery releases once the arm is back within
+        ``REALTIME_RECOVERY_EXIT_RAD`` of the leader, which is strictly below
+        the step size so the walk always converges.
+
+        Args:
+            arm_name: Robot arm attribute name.
+            desired: Validated leader target for this cycle.
+            measured: Current measured joint positions, or None when feedback
+                is unavailable.
+
+        Returns:
+            The target to hand to the hardware.
+        """
+        if arm_name not in self._tracking_recovery:
+            return desired
+        if (
+            measured is None
+            or measured.shape != (self.ARM_DOF,)
+            or not bool(np.isfinite(measured).all())
+        ):
+            # No usable feedback to clamp against; leave recovery rather than
+            # clamping the arm against garbage.
+            self._tracking_recovery.discard(arm_name)
+            return desired
+
+        gap = float(np.max(np.abs(desired - measured)))
+        if gap <= self.REALTIME_RECOVERY_EXIT_RAD:
+            self._tracking_recovery.discard(arm_name)
+            logger.info(
+                f"{arm_name} recovered to within {gap:.3f} rad of the leader — "
+                "resuming direct target tracking"
+            )
+            watchdog = getattr(self, "_arm_tracking_watchdog", None)
+            if watchdog is not None:
+                watchdog.reset()
+            return desired
+
+        step = self.REALTIME_RECOVERY_STEP_RAD
+        return np.clip(desired, measured - step, measured + step)
+
+    def _enter_tracking_recovery(self, arm_names: Iterable[str]) -> None:
+        """Start walking the named arms back toward the leader."""
+        for arm_name in arm_names:
+            if arm_name in self._tracking_recovery:
+                continue
+            self._tracking_recovery.add(arm_name)
+            logger.warning(
+                f"{arm_name} stalled — stepping commands in "
+                f"{self.REALTIME_RECOVERY_STEP_RAD:.2f} rad increments so the "
+                "firmware stops rejecting them"
+            )
 
     def _publish_telemetry(self, command: Dict):
         """Publish telemetry data for visualization.
@@ -1543,7 +1675,9 @@ class RobotController:
         logger.info(f"Starting robot control at {self.control_rate}Hz")
         logger.info(
             "Real-time arm control: direct targets, no application lead/speed "
-            f"clamp; tracking stop threshold={self.REALTIME_TRACKING_TOL_RAD:.2f} "
+            f"clamp ({self.REALTIME_RECOVERY_STEP_RAD:.2f} rad stepping only "
+            "while an arm is stalled); "
+            f"tracking stop threshold={self.REALTIME_TRACKING_TOL_RAD:.2f} "
             f"rad with <{self.TRACKING_MINIMUM_PROGRESS_RAD:.2f} rad progress "
             f"for {self.TRACKING_VIOLATION_DURATION_SECONDS:.2f}s"
         )

@@ -130,6 +130,7 @@ class BaseRecorder:
         self.rate_limiter = RateLimiter(self.record_rate)
         self._episode_finish_lock = threading.Lock()
         self._auto_discard_pending = False
+        self.pending_metadata: Dict[str, Any] = {}
 
         # Pedal-mode state.
         self.pedal_key_press_times: Dict[str, float] = {}
@@ -307,6 +308,9 @@ class BaseRecorder:
                 self.start_episode(data.get("metadata", {}))
         elif command == "discard" and self.is_recording:
             self.discard_episode()
+        elif command == "set_metadata":
+            self.pending_metadata = dict(data.get("metadata") or {})
+            logger.info(f"Updated pending episode metadata: {self.pending_metadata}")
 
     # ─── Episode lifecycle ─────────────────────────────────────────────────
 
@@ -314,6 +318,13 @@ class BaseRecorder:
         if self.is_recording:
             logger.warning("Already recording, ending current episode first")
             self.end_episode()
+
+        # Merge the latest backend-provided pending metadata (e.g. task label,
+        # instruction, annotator) with any metadata carried on the control
+        # message itself. JoyCon-originated starts only carry source/timestamp,
+        # so the pending metadata is what makes webpage annotations show up.
+        merged_metadata = dict(self.pending_metadata or {})
+        merged_metadata.update(metadata or {})
 
         self.is_recording = True
         self._auto_discard_pending = False
@@ -325,7 +336,7 @@ class BaseRecorder:
             self.current_action.clear()
             self.last_action.clear()
 
-        self._setup_storage(metadata or {})
+        self._setup_storage(merged_metadata)
 
         self.record_running = True
         self.record_thread = threading.Thread(
@@ -338,14 +349,14 @@ class BaseRecorder:
             f"<white><bold><bg green>🎬 RECORDING STARTED - Episode {self.episode_num}</bg green></bold></white>\n"
             f"  📁 Directory: {self.episode_dir.name if self.episode_dir else 'N/A'}\n"
             f"  📊 Record Rate: {self.record_rate} Hz\n"
-            f"  📝 Metadata: {metadata if metadata else 'None'}\n" + "=" * 80
+            f"  📝 Metadata: {merged_metadata if merged_metadata else 'None'}\n" + "=" * 80
         )
 
         self._show_rerun_indicator("start", {
             "episode_num": self.episode_num,
             "directory": self.episode_dir.name if self.episode_dir else "N/A",
             "record_rate": self.record_rate,
-            "metadata": metadata if metadata else "None",
+            "metadata": merged_metadata if merged_metadata else "None",
         })
 
     def end_episode(self) -> None:

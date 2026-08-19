@@ -33,6 +33,7 @@ class JoyConController(AbstractController):
     - Base control: +/- buttons (single) toggle activation (highest priority)
     - Head control: +/- buttons (simultaneous) toggle manual head control
     - Torso control: ZL/ZR buttons toggle activation (medium priority)
+    - Discard current recording: ZL+ZR hold (useful on robots without torso)
     - Gripper fine control: always available on the two stick Y axes
     - Recording: L+R hold, committed after both buttons are released
 
@@ -63,6 +64,7 @@ class JoyConController(AbstractController):
         self.exit_requested = False
         self._recording_release_armed = False
         self._recording_toggle_requested = False
+        self._recording_discard_requested = False
 
         # Statistics
         self.stats = {
@@ -73,6 +75,7 @@ class JoyConController(AbstractController):
             "hand_activations": 0,
             "estop_toggles": 0,
             "recording_toggles": 0,  # Add recording toggle stats
+            "recording_discards": 0,
         }
 
         logger.info("JoyCon controller initialized with debounced button management")
@@ -210,6 +213,17 @@ class JoyConController(AbstractController):
             on_triggered=self._on_recording_combo_held,
         )
 
+        # Discard combo: ZL + ZR (robots without torso can use this to drop a bad demo)
+        discard_duration = button_config.get("discard_hold_duration", 1.0)
+        self.button_manager.add_combo(
+            name="recording_discard",
+            buttons=["left_zl", "right_zr"],
+            hold_duration=discard_duration,
+            require_simultaneous=True,
+            grace_period=combo_grace_period,
+            on_triggered=self._on_recording_discard_triggered,
+        )
+
         # Head control toggle combo: + and - buttons simultaneously (shorter duration for quick toggle)
         head_toggle_duration = button_config.get("head_toggle_duration", 0.3)
         self.button_manager.add_combo(
@@ -238,6 +252,12 @@ class JoyConController(AbstractController):
         """Arm a recorder toggle; commit only after both shoulders release."""
         self._recording_release_armed = True
         logger.info("Recording toggle armed — release L + R to commit")
+
+    def _on_recording_discard_triggered(self) -> None:
+        """Request discarding the current episode via ZL + ZR."""
+        self._recording_discard_requested = True
+        self.stats["recording_discards"] += 1
+        logger.warning("Recording discard requested via JoyCon (ZL + ZR)")
 
     def _on_head_toggle_triggered(self) -> None:
         """Handle head control toggle."""
@@ -382,10 +402,14 @@ class JoyConController(AbstractController):
             elif "right_plus" in events and events["right_plus"] == ButtonEvent.PRESSED:
                 self._toggle_mode("base")
 
-        if "left_zl" in events and events["left_zl"] == ButtonEvent.PRESSED:
-            self._toggle_mode("torso")
-        elif "right_zr" in events and events["right_zr"] == ButtonEvent.PRESSED:
-            self._toggle_mode("torso")
+        both_zl_zr_pressed = raw_states.get("left_zl", False) and raw_states.get(
+            "right_zr", False
+        )
+        if not both_zl_zr_pressed:
+            if "left_zl" in events and events["left_zl"] == ButtonEvent.PRESSED:
+                self._toggle_mode("torso")
+            elif "right_zr" in events and events["right_zr"] == ButtonEvent.PRESSED:
+                self._toggle_mode("torso")
 
         # Process active control mode
         if self.base_active:
@@ -513,13 +537,17 @@ class JoyConController(AbstractController):
         }
 
     def get_recording_command(self) -> Optional[str]:
-        """Consume a recorder-authoritative toggle request.
+        """Consume a recorder command request.
 
         Returns:
-            ``"toggle"`` once after a completed L+R gesture, otherwise None.
-            The recorder decides whether that means start or stop from its
-            authoritative ``is_recording`` state.
+            ``"discard"`` once after a completed ZL+ZR gesture, ``"toggle"``
+            once after a completed L+R gesture, otherwise None. The recorder
+            decides whether toggle means start or stop from its authoritative
+            ``is_recording`` state.
         """
+        if self._recording_discard_requested:
+            self._recording_discard_requested = False
+            return "discard"
         if self._recording_toggle_requested:
             self._recording_toggle_requested = False
             return "toggle"
