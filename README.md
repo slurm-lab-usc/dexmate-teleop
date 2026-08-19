@@ -63,6 +63,11 @@ standalone stream check, run:
 omni-wrist-cameras
 ```
 
+## 📚 Documentation
+
+- [Dexmate Vega U Workstation Setup](docs/dexmate_vega_u_setup.md)
+- [Lab Member Quickstart](docs/lab_member_quickstart.md)
+
 ## 📄 Licensing
 
 This project is **dual-licensed**:
