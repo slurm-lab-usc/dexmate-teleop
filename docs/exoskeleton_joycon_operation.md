@@ -19,6 +19,8 @@ states, and the exact button mappings.
   (see [Lab Member Quickstart](lab_member_quickstart.md)).
 - The exoskeleton is connected to the workstation (e.g. via USB serial).
 - Both JoyCons are paired and connected before launching the stack.
+- Attach the JoyCons to the exoskeleton before starting. After teleop, remove
+  them from the exoskeleton and charge them.
 
 ## Before Starting: Right J6 Recovery
 
@@ -261,3 +263,4 @@ head control, then use the sticks to move the head.
   holding the arm. Watch for arm drift after shutdown or E-stop.
 - If the exoskeleton data is missing, do not try to satisfy alignment with the
   JoyCons. Fix the exoskeleton connection first.
+- After teleop, remove the JoyCons from the exoskeleton and charge them.
