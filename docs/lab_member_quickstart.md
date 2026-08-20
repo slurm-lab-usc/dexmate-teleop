@@ -152,4 +152,5 @@ docs.
 ## 9. Further Reading
 
 - [Dexmate Vega U Workstation Setup](https://github.com/Buzzy0423/omniteleop/blob/main/docs/dexmate_vega_u_setup.md)
+- [Exoskeleton + JoyCon Operation Guide](https://github.com/Buzzy0423/omniteleop/blob/main/docs/exoskeleton_joycon_operation.md)
 - [robot-policy-deploy](https://github.com/Buzzy0423/robot-policy-deploy)

@@ -14,6 +14,7 @@ your user environment:
 
 - [Dexmate Vega U Workstation Setup](https://github.com/Buzzy0423/omniteleop/blob/main/docs/dexmate_vega_u_setup.md)
 - [Lab Member Quickstart](https://github.com/Buzzy0423/omniteleop/blob/main/docs/lab_member_quickstart.md)
+- [Exoskeleton + JoyCon Operation Guide](https://github.com/Buzzy0423/omniteleop/blob/main/docs/exoskeleton_joycon_operation.md)
 
 The setup guide covers network, robot-side services, the shared certificate,
 and user-level environment variables. The quickstart covers cloning the repo,
