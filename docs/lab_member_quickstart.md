@@ -123,8 +123,17 @@ To stop:
 Enable **Record Mode** in the web interface when starting teleoperation, or use
 the JoyCon recording gesture.
 
-Recorded data is saved to the `recorder.save_dir` setting in the active
-`omniteleop` YAML configuration. Update it to your own path if needed.
+Recorded episodes can include:
+
+- Head camera left/right RGB
+- Wrist camera left/right RGB
+- Robot joint states (arms, grippers, head)
+- Left/right wrist force/torque
+- Commanded actions
+
+Data is saved under the `recorder.save_dir` setting in the active
+`omniteleop` YAML configuration. The default format is MCAP; MDP is also
+available. See the repository README for the full storage layout.
 
 ## 7. Policy Rollout (Optional)
 

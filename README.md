@@ -114,8 +114,58 @@ The system is designed to run a safe shutdown path when stopping.
 ## Recording Data
 
 Enable **Record Mode** in the web interface before starting teleoperation, or
-use the JoyCon recording gesture. Recorded episodes are saved according to the
-active robot YAML configuration (`recorder.save_dir`).
+use the JoyCon recording gesture.
+
+### What is recorded
+
+For the `vega_1u_gripper` configuration, an episode can include:
+
+- Head camera left/right RGB
+- Wrist camera left/right RGB
+- Head depth (if enabled in the YAML)
+- Robot joint states:
+  - Left/right arm positions and velocities
+  - Left/right gripper/hand positions
+  - Head position (if present)
+- Left/right wrist force/torque (wrench)
+- Commanded actions (robot action joint positions)
+
+The exact set is controlled by `recorder.components` in the active robot YAML.
+
+### Storage format
+
+- **MCAP** (default): written by `omni-mcap-recorder` as a dexdata-composable
+  episode.
+- **MDP**: written by `omni-mdp-recorder` as pickle + JPEG transitions.
+
+The format is selected in the web UI when starting teleoperation.
+
+### Storage location
+
+Episodes are saved under the `recorder.save_dir` setting in the active robot
+YAML. The default is `~/recordings` unless overridden.
+
+Episode directory layout:
+
+```text
+<save_dir>/<MM-DD-YYYY>/
+  episode_<timestamp>_<suffix>/
+    episode.mcap            # MCAP format
+    metadata.json           # episode metadata sidecar
+```
+
+For MDP format:
+
+```text
+<save_dir>/<MM-DD-YYYY>/
+  episode_<number>_<timestamp>/
+    metadata.json
+    transitions.pkl
+    head_left_rgb/
+    head_right_rgb/
+    left_wrist_rgb/
+    right_wrist_rgb/
+```
 
 ## Command-Line Tools
 
