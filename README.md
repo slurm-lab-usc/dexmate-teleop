@@ -21,6 +21,35 @@ and user-level environment variables. The quickstart covers cloning the repo,
 creating the `dexrobot` conda environment, setting `ROBOT_NAME` / `ROBOT_IP` /
 `ROBOT_CONFIG` / `ZENOH_CONFIG`, and verifying robot connectivity.
 
+## Before You Start: Right J6 Recovery
+
+Due to a manufacturing issue, `R_arm_j6` can drift below its lower limit after
+the robot is powered off. Each time after the robot is powered on, check the
+**Doctor** panel in the web UI before starting teleoperation.
+
+If `R_arm_j6` is outside its limits:
+
+1. Use Doctor to release the brake for only `R_arm_j6`.
+2. Physically support and raise the joint back inside its valid range.
+3. Re-engage the brake release in Doctor.
+4. Run **Doctor Init** to move both arms to the zero pose.
+
+See the
+[Exoskeleton + JoyCon Operation Guide](https://github.com/Buzzy0423/omniteleop/blob/main/docs/exoskeleton_joycon_operation.md)
+for the full recovery procedure.
+
+## Doctor (Recovery / Maintenance)
+
+Doctor is available in the web UI and provides:
+
+- Clear component errors
+- Brake release / engage for individual joints
+- Init Arm / Doctor Init to move both arms to a safe zero pose
+- Manual open / close of the grippers
+
+Use Doctor when a joint is out of limits, the robot reports errors, or you need
+to recover the arms before teleoperation.
+
 ## Features
 
 - Exoskeleton arm teleoperation
