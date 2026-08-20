@@ -241,7 +241,7 @@ head control, then use the sticks to move the head.
    ```
 4. Start the backend:
    ```bash
-   cd ~/workspace/projects/omniteleop/src/omniteleop/app
+   cd ~/workspace/projects/dexmate-teleop/src/omniteleop/app
    bash launch.sh
    ```
 5. Open `http://localhost:5006`.

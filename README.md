@@ -12,9 +12,9 @@ The primary workflow in this lab is **exoskeleton teleoperation**.
 Before using the robot, follow these guides to configure the workstation and
 your user environment:
 
-- [Dexmate Vega U Workstation Setup](https://github.com/Buzzy0423/omniteleop/blob/main/docs/dexmate_vega_u_setup.md)
-- [Lab Member Quickstart](https://github.com/Buzzy0423/omniteleop/blob/main/docs/lab_member_quickstart.md)
-- [Exoskeleton + JoyCon Operation Guide](https://github.com/Buzzy0423/omniteleop/blob/main/docs/exoskeleton_joycon_operation.md)
+- [Dexmate Vega U Workstation Setup](https://github.com/slurm-lab-usc/dexmate-teleop/blob/main/docs/dexmate_vega_u_setup.md)
+- [Lab Member Quickstart](https://github.com/slurm-lab-usc/dexmate-teleop/blob/main/docs/lab_member_quickstart.md)
+- [Exoskeleton + JoyCon Operation Guide](https://github.com/slurm-lab-usc/dexmate-teleop/blob/main/docs/exoskeleton_joycon_operation.md)
 
 The setup guide covers network, robot-side services, the shared certificate,
 and user-level environment variables. The quickstart covers cloning the repo,
@@ -35,7 +35,7 @@ If `R_arm_j6` is outside its limits:
 4. Run **Doctor Init** to move both arms to the zero pose.
 
 See the
-[Exoskeleton + JoyCon Operation Guide](https://github.com/Buzzy0423/omniteleop/blob/main/docs/exoskeleton_joycon_operation.md)
+[Exoskeleton + JoyCon Operation Guide](https://github.com/slurm-lab-usc/dexmate-teleop/blob/main/docs/exoskeleton_joycon_operation.md)
 for the full recovery procedure.
 
 ## Doctor (Recovery / Maintenance)
@@ -63,19 +63,19 @@ to recover the arms before teleoperation.
 ## Installation
 
 ```bash
-cd omniteleop/
+cd dexmate-teleop/
 pip install -e .
 ```
 
 For the full multi-user setup, including the correct `dexcontrol` and `dextop`
-versions, see the [Lab Member Quickstart](https://github.com/Buzzy0423/omniteleop/blob/main/docs/lab_member_quickstart.md).
+versions, see the [Lab Member Quickstart](https://github.com/slurm-lab-usc/dexmate-teleop/blob/main/docs/lab_member_quickstart.md).
 
 ## Teleop Workflow
 
 ### 1. Prepare the environment
 
 Make sure you have completed the steps in the
-[Lab Member Quickstart](https://github.com/Buzzy0423/omniteleop/blob/main/docs/lab_member_quickstart.md):
+[Lab Member Quickstart](https://github.com/slurm-lab-usc/dexmate-teleop/blob/main/docs/lab_member_quickstart.md):
 
 - `dexrobot` conda environment created
 - `dextop==0.4.7` and `dexcontrol==0.4.10` installed

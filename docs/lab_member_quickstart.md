@@ -23,7 +23,7 @@ mkdir -p ~/workspace/projects
 cd ~/workspace/projects
 
 # Teleoperation / data collection
-git clone git@github.com:Buzzy0423/omniteleop.git
+git clone git@github.com:slurm-lab-usc/dexmate-teleop.git
 
 # Policy rollout
 git clone git@github.com:Buzzy0423/robot-policy-deploy.git
@@ -48,7 +48,7 @@ conda activate dexrobot
 Install `omniteleop`:
 
 ```bash
-cd ~/workspace/projects/omniteleop
+cd ~/workspace/projects/dexmate-teleop
 python -m pip install -e .
 ```
 
@@ -103,7 +103,7 @@ You should see robot state topics under `dm/vge07dbe2d05-1u/...`.
 ## 5. Start Exoskeleton Teleoperation
 
 ```bash
-cd ~/workspace/projects/omniteleop/src/omniteleop/app
+cd ~/workspace/projects/dexmate-teleop/src/omniteleop/app
 bash launch.sh
 ```
 
@@ -151,6 +151,6 @@ docs.
 
 ## 9. Further Reading
 
-- [Dexmate Vega U Workstation Setup](https://github.com/Buzzy0423/omniteleop/blob/main/docs/dexmate_vega_u_setup.md)
-- [Exoskeleton + JoyCon Operation Guide](https://github.com/Buzzy0423/omniteleop/blob/main/docs/exoskeleton_joycon_operation.md)
+- [Dexmate Vega U Workstation Setup](https://github.com/slurm-lab-usc/dexmate-teleop/blob/main/docs/dexmate_vega_u_setup.md)
+- [Exoskeleton + JoyCon Operation Guide](https://github.com/slurm-lab-usc/dexmate-teleop/blob/main/docs/exoskeleton_joycon_operation.md)
 - [robot-policy-deploy](https://github.com/Buzzy0423/robot-policy-deploy)
