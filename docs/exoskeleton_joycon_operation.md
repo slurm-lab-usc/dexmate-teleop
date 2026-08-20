@@ -42,8 +42,12 @@ teleoperation.
 
 2. Open the **Doctor** panel.
 
+   ![Doctor main](../assets/main.png)
+
    Wait for all joint statuses to load. Look for `R_arm_j6` (right arm joint
    index 5) showing `outside_limits`.
+
+   ![Doctor joint status](../assets/doctor.png)
 
 3. In Doctor, use **brake release** for only `R_arm_j6`.
 
@@ -56,6 +60,8 @@ teleoperation.
 
    It is safer to move it a little past the boundary (for example near
    `-1.20` to `-1.10 rad`) rather than stopping exactly at the limit.
+
+   ![Right J6 recovery](../assets/right_j6.JPG)
 
 5. In Doctor, **disable / re-engage the brake release** for that joint.
 
