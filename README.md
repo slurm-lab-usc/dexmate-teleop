@@ -1,91 +1,112 @@
-<div align="center">
-  <h1>🎮 Omniteleop - Teleoperation Stack for Dexmate Robots</h1>
-</div>
+# Omniteleop
 
-![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue)
+Omniteleop is a teleoperation stack for Dexmate robots. It provides the
+software needed to control a Dexmate Vega U robot with an exoskeleton leader,
+collect teleoperation data, replay trajectories, and monitor robot state
+through a web interface.
 
-## 📦 Installation
+The primary workflow in this lab is **exoskeleton teleoperation**.
 
-```shell
+## Documentation
+
+Before using the robot, follow these guides to configure the workstation and
+your user environment:
+
+- [Dexmate Vega U Workstation Setup](https://github.com/Buzzy0423/omniteleop/blob/main/docs/dexmate_vega_u_setup.md)
+- [Lab Member Quickstart](https://github.com/Buzzy0423/omniteleop/blob/main/docs/lab_member_quickstart.md)
+
+The setup guide covers network, robot-side services, the shared certificate,
+and user-level environment variables. The quickstart covers cloning the repo,
+creating the `dexrobot` conda environment, setting `ROBOT_NAME` / `ROBOT_IP` /
+`ROBOT_CONFIG` / `ZENOH_CONFIG`, and verifying robot connectivity.
+
+## Features
+
+- Exoskeleton arm teleoperation
+- JoyCon controller support
+- Safety system with emergency stop and joint-limit enforcement
+- Data collection / recording for policy learning
+- Trajectory replay
+- Web-based GUI for teleop, monitoring, and recording
+- Local UVC wrist camera support
+
+## Installation
+
+```bash
 cd omniteleop/
 pip install -e .
 ```
 
-## ✨ Features
+For the full multi-user setup, including the correct `dexcontrol` and `dextop`
+versions, see the [Lab Member Quickstart](https://github.com/Buzzy0423/omniteleop/blob/main/docs/lab_member_quickstart.md).
 
-- 🕹️ **JoyCon Controller Support** - Use Nintendo JoyCon for robot control
-- 💪 **Exoskeleton Arm Control** - Intuitive arm teleoperation via Dynamixel exoskeleton
-- 🥽 **VR Teleoperation** - Relative delta commands to conrol humanoid arm and torso.
-- 🛡️ **Safety System** - Built-in emergency stop and joint limits enforcement
-- 📹 **Data Collection** - Record teleoperation data for policy learning
-- 🔄 **Trajectory Replay** - Replay recorded robot trajectories
-- 📊 **Telemetry Viewer** - Real-time visualization of joint data
-- 😎 **GUI** - Easy to use WebApp that provides an intuitive, visual layer to the entire repository.
+## Teleop Workflow
 
-## 🚀 Quick Start
+### 1. Prepare the environment
 
-```shell
-omni-arm       # Exoskeleton arm reader
-omni-joycon    # JoyCon controller reader
-omni-cmd       # Command processor with safety
-omni-robot     # Robot controller
-omni-recorder  # MDP recorder for policy learning
-omni-mcap-recorder # MCAP recorder for policy learning
-omni-wrist-cameras # Local UVC wrist cameras → standard Zenoh camera topics
-omni-telemetry # Telemetry viewer
-omni-paddle    # VR reader
+Make sure you have completed the steps in the
+[Lab Member Quickstart](https://github.com/Buzzy0423/omniteleop/blob/main/docs/lab_member_quickstart.md):
 
-app/launch.sh  # One command that replaces all
+- `dexrobot` conda environment created
+- `dextop==0.4.7` and `dexcontrol==0.4.10` installed
+- `ROBOT_NAME`, `ROBOT_IP`, `ROBOT_CONFIG`, and `ZENOH_CONFIG` set
+- Robot connection verified with `dextop topic list`
+
+### 2. Start the teleop backend
+
+```bash
+cd src/omniteleop/app
+bash launch.sh
 ```
 
-### JoyCon Gripper Controls
+### 3. Open the web interface
 
-For gripper robot configurations such as `vega_1u_gripper`:
+Navigate to:
 
-- Left/right stick up and down: proportional fine open/close for that gripper.
-- Left D-pad Up/Down: fully open/close the left gripper.
-- Right X/B: fully open/close the right gripper.
-- Hold L+R for `recording_hold_duration`, then release both: toggle recording.
-- L and R have no individual gripper action.
-
-After E-stop, another control mode, or the L+R recording gesture, each gripper
-stick must return to center once before fine control resumes.
-
-### Local UVC Wrist Cameras
-
-When `recorder.wrist_camera_adapter.enabled` and either wrist RGB component are
-enabled in the active robot YAML, the app starts the adapter automatically in
-record mode. It publishes `/dev/dexmate-wrist-left` and
-`/dev/dexmate-wrist-right` on the standard Dexmate wrist-camera topics. For a
-standalone stream check, run:
-
-```shell
-omni-wrist-cameras
+```text
+http://localhost:5006
 ```
 
-## 📚 Documentation
+### 4. Start exoskeleton teleoperation
 
-- [Dexmate Vega U Workstation Setup](docs/dexmate_vega_u_setup.md)
-- [Lab Member Quickstart](docs/lab_member_quickstart.md)
+- In the web interface, select **Leader Mode: Exoskeleton**.
+- Follow the alignment steps shown in the UI.
+- Once the robot is aligned and active, use the exoskeleton to control the
+  robot.
 
-## 📄 Licensing
+### 5. Stop teleoperation
 
-This project is **dual-licensed**:
+- Click **Stop** in the web interface, or
+- Press `Ctrl+C` in the terminal running `launch.sh`.
 
-### 🔓 Open Source License
-This software is available under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
-See the [LICENSE](./LICENSE) file for details.
+The system is designed to run a safe shutdown path when stopping.
 
-### 💼 Commercial License
-For businesses that want to use this software in proprietary applications without the AGPL requirements, commercial licenses are available.
+## Recording Data
 
-**📧 Contact us for commercial licensing:** contact@dexmate.ai
+Enable **Record Mode** in the web interface before starting teleoperation, or
+use the JoyCon recording gesture. Recorded episodes are saved according to the
+active robot YAML configuration (`recorder.save_dir`).
 
----
+## Command-Line Tools
 
-<div align="center">
-  <h3>🤝 Ready to teleoperate robots?</h3>
-  <p>
-    <a href="mailto:contact@dexmate.ai">📧 Contact Us</a>
-  </p>
-</div>
+The repository also provides individual command-line entry points:
+
+```text
+omni-arm            Exoskeleton arm reader
+omni-joycon         JoyCon controller reader
+omni-cmd            Command processor with safety
+omni-robot          Robot controller
+omni-recorder       MDP recorder for policy learning
+omni-mcap-recorder  MCAP recorder for policy learning
+omni-wrist-cameras  Local UVC wrist cameras
+omni-telemetry      Telemetry viewer
+```
+
+## License
+
+This project is dual-licensed:
+
+- **Open Source**: GNU Affero General Public License v3.0 (AGPL-3.0)
+- **Commercial**: available from Dexmate
+
+See [LICENSE](./LICENSE) for details.
