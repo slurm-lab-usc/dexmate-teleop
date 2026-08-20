@@ -5,6 +5,12 @@ software needed to control a Dexmate Vega U robot with an exoskeleton leader,
 collect teleoperation data, replay trajectories, and monitor robot state
 through a web interface.
 
+Dexmate-Vega-U
+   ![Dexmate-Vega-U](assets/dexmate.JPG)
+
+Exoskeleton
+   ![Exoskeleton](assets/exoskeleton.JPG)
+
 The primary workflow in this lab is **exoskeleton teleoperation**.
 
 ## Documentation
@@ -20,6 +26,25 @@ The setup guide covers network, robot-side services, the shared certificate,
 and user-level environment variables. The quickstart covers cloning the repo,
 creating the `dexrobot` conda environment, setting `ROBOT_NAME` / `ROBOT_IP` /
 `ROBOT_CONFIG` / `ZENOH_CONFIG`, and verifying robot connectivity.
+
+## ⚠️ Important: Unexpected Robot Disconnect (igc NIC Kernel Issue)
+
+On some Linux workstations using the Intel `igc` Ethernet controller, a
+kernel/driver issue can cause the robot-facing network link to drop
+unexpectedly while using the robot.
+
+Symptoms:
+
+- `dextop topic list` suddenly shows no topics
+- Teleop stops responding or loses the robot connection
+- `ping 192.168.50.20` fails even though the cable is still connected
+
+If this happens, restarting robot-side services is usually **not enough**. The
+reliable workaround is to **reboot the workstation** to reset the NIC
+kernel/driver state.
+
+After rebooting, follow the normal startup checklist before using the robot
+again.
 
 ## Before You Start: Right J6 Recovery
 
