@@ -9,18 +9,20 @@ teleoperation.
 The validated robot used by this guide:
 
 ```text
-Hostname:               vega-1u
-Robot name:             dm/vge07dbe2d05-1u
-Robot communication IP: 192.168.50.20
-Robot SSH username:      dexmate
-Internal management UI:  http://192.168.50.21:57832
-Management UI password:  slurm@dexmate
+Hostname:                vega-1u
+Robot name:              dm/vge07dbe2d05-1u
+Robot public/external IP: 192.168.50.20
+Robot SSH username:       dexmate
+Robot SSH password:       hello-dex
+Internal management UI:   http://192.168.50.21:57832
+Management UI password:   slurm@dexmate
 ```
 
 Replace these values if you are configuring a different robot.
 
-The management UI is an internal web service, not an SSH endpoint. Its
-password is separate from the SSH password for `dexmate@192.168.50.20`.
+`192.168.50.20` is the robot's public/external interface on the private robot
+network and supports SSH access. The management UI on `192.168.50.21:57832`
+is an internal web service, not an SSH endpoint, and uses a separate password.
 Administrators keep the management UI recovery code separately in a private
 repository; the recovery code must not be committed to this repository.
 
@@ -48,21 +50,21 @@ not needed when adding a new user.
 The workstation and robot use fixed addresses on a private Ethernet subnet:
 
 ```text
-Workstation Ethernet: 192.168.50.10/24
-Robot torso Ethernet: 192.168.50.20/24
-Robot internal UI:     192.168.50.21:57832
-Subnet mask:           255.255.255.0
-Gateway:               none
-DNS:                   none
+Workstation Ethernet:      192.168.50.10/24
+Robot public/external IP:  192.168.50.20/24
+Robot internal UI:         192.168.50.21:57832
+Subnet mask:               255.255.255.0
+Gateway:                   none
+DNS:                       none
 ```
 
 Notes:
 
 - The workstation address belongs to the workstation's Ethernet interface, not
   to the robot.
-- Do not assign `.20` or `.21` to the workstation. `.20` is the robot
-  communication address, and `.21` is reserved for the internal management
-  UI.
+- Do not assign `.20` or `.21` to the workstation. `.20` is the robot's
+  public/external communication interface, and `.21` is reserved for the
+  internal management UI.
 - In `192.168.50.21:57832`, `.21` is part of the IP address and `57832` is the
   web service's TCP port.
 - Mark the robot connection as `never-default` so it does not replace the
@@ -143,9 +145,9 @@ No output and a zero exit status means the connection succeeded.
 ssh dexmate@192.168.50.20
 ```
 
-The SSH credentials are separate from the internal management UI credentials.
-Contact an administrator if SSH access is required; do not try the management
-UI password at the SSH prompt.
+Log in with the robot SSH password listed in
+[Robot Information](#robot-information). The internal management UI uses a
+separate password; do not try that password at the SSH prompt.
 
 Confirm identity and time:
 
