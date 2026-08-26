@@ -9,13 +9,20 @@ teleoperation.
 The validated robot used by this guide:
 
 ```text
-Hostname:    vega-1u
-Robot name: dm/vge07dbe2d05-1u
-Robot IP:   192.168.50.20
-Username:   dexmate
+Hostname:               vega-1u
+Robot name:             dm/vge07dbe2d05-1u
+Robot communication IP: 192.168.50.20
+Robot SSH username:      dexmate
+Internal management UI:  http://192.168.50.21:57832
+Management UI password:  slurm@dexmate
 ```
 
 Replace these values if you are configuring a different robot.
+
+The management UI is an internal web service, not an SSH endpoint. Its
+password is separate from the SSH password for `dexmate@192.168.50.20`.
+Administrators keep the management UI recovery code separately in a private
+repository; the recovery code must not be committed to this repository.
 
 ## Configuration Overview
 
@@ -23,7 +30,7 @@ For a shared workstation, configuration is split into two levels:
 
 | Level | What is included | Who is responsible |
 |-------|------------------|--------------------|
-| Admin / machine-level | Ethernet/NetworkManager, robot-side relay and camera services, shared certificate directory | Administrator, usually done once |
+| Admin / machine-level | Ethernet/NetworkManager, robot-side relay and camera services, internal management UI, certificate renewal, shared certificate directory | Administrator |
 | User-level | Personal conda environment, environment variables, access to the shared certificate | Each lab member |
 
 On the current workstation, the admin/machine-level configuration is already
@@ -43,6 +50,7 @@ The workstation and robot use fixed addresses on a private Ethernet subnet:
 ```text
 Workstation Ethernet: 192.168.50.10/24
 Robot torso Ethernet: 192.168.50.20/24
+Robot internal UI:     192.168.50.21:57832
 Subnet mask:           255.255.255.0
 Gateway:               none
 DNS:                   none
@@ -52,7 +60,11 @@ Notes:
 
 - The workstation address belongs to the workstation's Ethernet interface, not
   to the robot.
-- Do not use `.20` (robot) or `.21` (may be used by an internal robot device).
+- Do not assign `.20` or `.21` to the workstation. `.20` is the robot
+  communication address, and `.21` is reserved for the internal management
+  UI.
+- In `192.168.50.21:57832`, `.21` is part of the IP address and `57832` is the
+  web service's TCP port.
 - Mark the robot connection as `never-default` so it does not replace the
   normal Internet route.
 
@@ -131,11 +143,9 @@ No output and a zero exit status means the connection succeeded.
 ssh dexmate@192.168.50.20
 ```
 
-The factory default password may be:
-
-```text
-hello-dex
-```
+The SSH credentials are separate from the internal management UI credentials.
+Contact an administrator if SSH access is required; do not try the management
+UI password at the SSH prompt.
 
 Confirm identity and time:
 
@@ -160,7 +170,7 @@ Expected versions:
 
 ```text
 Python 3.10
-dextop 0.4.7
+dextop 0.5.0
 dexcontrol 0.4.10
 ```
 
@@ -274,7 +284,49 @@ A Socbridge diagnostics warning may still appear while the device is reachable
 through an SSH fallback. Record the warning, but do not update firmware unless
 required by the official procedure.
 
-## A.4 Shared Certificate Directory
+## A.4 Internal Management UI
+
+Administrators can open the robot's internal management UI from a workstation
+on the robot network:
+
+```text
+http://192.168.50.21:57832
+```
+
+Log in with the management UI password listed in
+[Robot Information](#robot-information). This interface is used for
+administrator-only maintenance, including uploading the robot certificate
+package. The recovery code is stored separately in an administrator-only
+private repository and is shared only with other robot administrators.
+
+## A.5 Certificate Renewal and Shared Certificate Directory
+
+The robot certificate expires approximately every 90 days. An expired
+certificate can prevent robot communication and operation even when
+`192.168.50.20` still replies to `ping`. Administrators should track the
+expiration date and renew the certificate before it expires.
+
+### A.5.1 Renew the Robot Certificate
+
+Certificate renewal uses the robot's internal management UI and the
+`dextop`-provided package extraction/import mechanism:
+
+1. Obtain the renewed certificate package from the approved source.
+2. Open `http://192.168.50.21:57832` and log in as an administrator.
+3. Open the certificate management page and upload the renewed package.
+4. Complete the `dextop`-managed extraction/import flow shown by the UI or
+   supplied with the certificate package.
+5. Restart services or reboot only if the Dexmate renewal procedure requests
+   it.
+6. From the workstation, run `dextop topic list --timeout 20` and confirm that
+   the robot topics are available.
+
+Do not unpack the certificate package with a generic archive tool or manually
+replace robot-side certificate files. The exact UI labels and `dextop` command
+may change between Dexmate releases, so administrators must follow the renewal
+instructions supplied with the current package.
+
+### A.5.2 Share the Resulting Workstation Certificate
 
 The `.dzcfg` file is a sensitive robot access credential. Do not commit it to
 Git, upload it to an issue, or share it through an unapproved channel.
@@ -293,7 +345,8 @@ sudo mkdir -p /srv/dexmate/certs
 sudo chown root:dexlab /srv/dexmate/certs
 sudo chmod 750 /srv/dexmate/certs
 
-# 3. Place the certificate
+# 3. Place the current, validated certificate produced by the supported
+#    Dexmate/dextop renewal flow
 sudo cp /secure/path/to/VGE07DBE2D05.dzcfg /srv/dexmate/certs/
 sudo chown root:dexlab /srv/dexmate/certs/VGE07DBE2D05.dzcfg
 sudo chmod 640 /srv/dexmate/certs/VGE07DBE2D05.dzcfg
@@ -337,7 +390,7 @@ conda activate dexrobot
 Install the required versions:
 
 ```bash
-python -m pip install 'dextop==0.4.7'
+python -m pip install 'dextop==0.5.0'
 python -m pip install 'dexcontrol==0.4.10'
 ```
 
@@ -353,7 +406,7 @@ Expected:
 
 ```text
 Python 3.11
-dextop 0.4.7
+dextop 0.5.0
 dexcontrol 0.4.10
 ```
 
@@ -483,7 +536,7 @@ systemctl status dextop-node.service --no-pager
 
 ### Relay Connects but Zero Topics Are Found
 
-Check both sides use `dextop 0.4.7`:
+Check both sides use `dextop 0.5.0`:
 
 ```bash
 dextop --version
@@ -492,7 +545,7 @@ dextop --version
 If not, install the matching version:
 
 ```bash
-python -m pip install 'dextop==0.4.7'
+python -m pip install 'dextop==0.5.0'
 ```
 
 Then retry:

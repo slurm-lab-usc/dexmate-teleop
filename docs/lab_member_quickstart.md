@@ -55,7 +55,7 @@ python -m pip install -e .
 Install the required communication versions:
 
 ```bash
-python -m pip install 'dextop==0.4.7'
+python -m pip install 'dextop==0.5.0'
 python -m pip install 'dexcontrol==0.4.10'
 ```
 
@@ -99,6 +99,13 @@ dextop topic list --timeout 20
 ```
 
 You should see robot state topics under `dm/vge07dbe2d05-1u/...`.
+
+The robot certificate expires approximately every 90 days. If the robot still
+replies to `ping` but `dextop topic list` fails with a certificate/TLS error or
+shows no robot topics, contact an administrator to check the expiration date.
+Administrators renew the certificate through the internal management UI at
+`http://192.168.50.21:57832`; lab members should not attempt to replace or
+unpack certificate files themselves.
 
 ## 5. Start Exoskeleton Teleoperation
 
