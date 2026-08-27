@@ -489,7 +489,7 @@ class RobotController:
         deadline = time.monotonic() + self.MODE_HOLD_SECONDS
         while time.monotonic() < deadline:
             for name, arm in arms.items():
-                arm.set_joint_pos(targets[name])
+                arm.set_joint_pos(targets[name], wait_time=0.0)
             rate.sleep()
         self._validate_live_arm_safety()
         drift = {
@@ -577,9 +577,9 @@ class RobotController:
                 cmd_pos = np.array(gen.out.new_position)
 
                 if component == "torso":
-                    self.robot.torso.set_joint_pos(cmd_pos)
+                    self.robot.torso.set_joint_pos(cmd_pos, wait_time=0.0)
                 elif component in {"left_arm", "right_arm"}:
-                    getattr(self.robot, component).set_joint_pos(cmd_pos)
+                    getattr(self.robot, component).set_joint_pos(cmd_pos, wait_time=0.0)
                     final_arm_targets[component] = cmd_pos
 
                 if result != ruckig.Result.Working:
@@ -916,7 +916,7 @@ class RobotController:
             if self.exit_requested:
                 return
             for name, target in targets.items():
-                getattr(self.robot, name).set_joint_pos(target)
+                getattr(self.robot, name).set_joint_pos(target, wait_time=0.0)
             self._validate_live_arm_safety()
 
             actuals: dict[str, np.ndarray] = {}
@@ -1039,7 +1039,7 @@ class RobotController:
         deadline = time.monotonic() + self.FINAL_REACH_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
             for name, target in targets.items():
-                getattr(self.robot, name).set_joint_pos(target)
+                getattr(self.robot, name).set_joint_pos(target, wait_time=0.0)
             self._validate_live_arm_safety()
             errors = {
                 name: float(
@@ -1111,11 +1111,11 @@ class RobotController:
         for waypoint in trajectory:
             if has_left and all(j in waypoint for j in left_names):
                 self.robot.left_arm.set_joint_pos(
-                    np.array([waypoint[j] for j in left_names])
+                    np.array([waypoint[j] for j in left_names]), wait_time=0.0
                 )
             if has_right and all(j in waypoint for j in right_names):
                 self.robot.right_arm.set_joint_pos(
-                    np.array([waypoint[j] for j in right_names])
+                    np.array([waypoint[j] for j in right_names]), wait_time=0.0
                 )
             rate_limiter.sleep()
 
@@ -1592,11 +1592,13 @@ class RobotController:
             self.robot.torso.set_joint_pos_vel(
                 torso_data["pos"],
                 0.2,
+                wait_time=0.0,
             )
         else:
             self.robot.torso.set_joint_pos_vel(
                 torso_data["pos"],
                 torso_data["vel"],
+                wait_time=0.0,
             )
 
     def _send_head_command(self, head_data: Dict):
@@ -1626,7 +1628,7 @@ class RobotController:
                     velocities = arm_data["vel"]
                     arm.set_joint_pos_vel(positions, velocities)
                 else:
-                    arm.set_joint_pos(positions)
+                    arm.set_joint_pos(positions, wait_time=0.0)
 
     def _send_hand_command(self, hand_name: str, hand_data: Dict):
         """Send command to hand.

@@ -1167,7 +1167,7 @@ class TeleopApp:
                             hold_deadline = time.monotonic() + 0.5
                             while time.monotonic() < hold_deadline:
                                 for name, arm in arms.items():
-                                    arm.set_joint_pos(starts[name])
+                                    arm.set_joint_pos(starts[name], wait_time=0.0)
                                 time.sleep(0.01)
                             hold_drift = {
                                 name: float(
@@ -1225,7 +1225,10 @@ class TeleopApp:
                             final_hold_deadline = time.monotonic() + 0.5
                             while time.monotonic() < final_hold_deadline:
                                 for name, arm in arms.items():
-                                    arm.set_joint_pos(final_targets[name])
+                                    arm.set_joint_pos(
+                                        final_targets[name],
+                                        wait_time=0.0,
+                                    )
                                 time.sleep(0.01)
                             result.update(
                                 {
@@ -1255,7 +1258,10 @@ class TeleopApp:
                                 failure_hold_deadline = time.monotonic() + 0.5
                                 while time.monotonic() < failure_hold_deadline:
                                     for name, arm in arms.items():
-                                        arm.set_joint_pos(failure_targets[name])
+                                        arm.set_joint_pos(
+                                            failure_targets[name],
+                                            wait_time=0.0,
+                                        )
                                     time.sleep(0.01)
                             raise
 

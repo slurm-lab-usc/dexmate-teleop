@@ -259,7 +259,7 @@ def _publish_hold(
     report: ArmParkReport,
 ) -> None:
     try:
-        arm.set_joint_pos(target)
+        arm.set_joint_pos(target, wait_time=0.0)
         report.hold_commands += 1
     except Exception as exc:  # noqa: BLE001
         warning = f"hold command failed: {exc}"
