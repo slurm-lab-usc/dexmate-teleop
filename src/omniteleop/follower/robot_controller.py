@@ -706,17 +706,19 @@ class RobotController:
         """Send torso directly to its home position (no planning)."""
         if not (self.has_torso and "torso" in self.home_positions):
             return
-        self.robot.torso.move_to_joint_pos(
-            self.home_positions["torso"]
-        ).wait(timeout=9.0)
+        self.robot.torso.set_joint_pos(
+            self.home_positions["torso"],
+            wait_time=9.0,
+            exit_on_reach=True,
+        )
 
     def _move_head_to_home_direct(self) -> None:
         """Send head directly to its home position (no planning)."""
         if "head" not in self.home_positions:
             return
-        self.robot.head.move_to_joint_pos(
-            self.home_positions["head"]
-        ).wait(timeout=2.0)
+        self.robot.head.set_joint_pos(
+            self.home_positions["head"], wait_time=2.0, exit_on_reach=True
+        )
 
     def _plan_and_execute_arms_to_home(self) -> None:
         """Plan a collision-free trajectory for both arms to their home pose.
@@ -1189,9 +1191,9 @@ class RobotController:
             self.robot.estop.deactivate()
             self._ensure_arms_in_position_mode()
             self.robot.head.set_mode("enable")
-            self.robot.head.move_to_joint_pos(
-                self.home_positions["head"]
-            ).wait(timeout=2.0)
+            self.robot.head.set_joint_pos(
+                self.home_positions["head"], wait_time=2.0, exit_on_reach=True
+            )
             # Drop trajectory points accumulated before the pause so the
             # resume follows the fresh command flow instead of a stale,
             # possibly unclipped target.
