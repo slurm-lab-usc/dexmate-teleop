@@ -32,7 +32,7 @@ dependencies = [
     "rich>=13.0.0",
     "tyro>=0.5.0",
     "pyyaml>=6.0",
-    "dexcontrol>=0.4.10,<0.5",  # Validated arm-mode responses + read-only construction
+    "dexcontrol>=0.5.0,<0.6",  # Requires local fork branch with validated arm-mode responses + read-only construction
     "pytransform3d>=3.14.2",
     "python-socketio>=5.13.0",
     "rerun-sdk>=0.15.0",  # Rerun visualization for robotics data
@@ -47,7 +47,7 @@ dependencies = [
     "hatch",
     "joycon-lib",  # brings in evdev on Linux / hidapi elsewhere
     "fastapi>=0.100.0",
-    "dextop",
+    "dextop>=0.5.0,<0.6",  # topic list CLI compatible with 0.5.x
     "uvicorn[standard]>=0.20.0",
     "pynput>=1.7.0",
 ]

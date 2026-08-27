@@ -438,7 +438,7 @@ class RobotController:
             arm = getattr(self.robot, arm_name, None)
             if arm is None:
                 continue
-            state = arm._get_state()  # noqa: SLF001 - public getters omit errors
+            state = arm.get_state()  # noqa: SLF001 - public getters omit errors
             errors = state.get("error")
             active = has_active_joint_error(errors)
             if errors and not active:
@@ -489,7 +489,7 @@ class RobotController:
         deadline = time.monotonic() + self.MODE_HOLD_SECONDS
         while time.monotonic() < deadline:
             for name, arm in arms.items():
-                arm.set_joint_pos(targets[name], wait_time=0.0)
+                arm.set_joint_pos(targets[name])
             rate.sleep()
         self._validate_live_arm_safety()
         drift = {
@@ -577,9 +577,9 @@ class RobotController:
                 cmd_pos = np.array(gen.out.new_position)
 
                 if component == "torso":
-                    self.robot.torso.set_joint_pos(cmd_pos, wait_time=0.0)
+                    self.robot.torso.set_joint_pos(cmd_pos)
                 elif component in {"left_arm", "right_arm"}:
-                    getattr(self.robot, component).set_joint_pos(cmd_pos, wait_time=0.0)
+                    getattr(self.robot, component).set_joint_pos(cmd_pos)
                     final_arm_targets[component] = cmd_pos
 
                 if result != ruckig.Result.Working:
@@ -706,19 +706,17 @@ class RobotController:
         """Send torso directly to its home position (no planning)."""
         if not (self.has_torso and "torso" in self.home_positions):
             return
-        self.robot.torso.set_joint_pos(
-            self.home_positions["torso"],
-            wait_time=9.0,
-            exit_on_reach=True,
-        )
+        self.robot.torso.move_to_joint_pos(
+            self.home_positions["torso"]
+        ).wait(timeout=9.0)
 
     def _move_head_to_home_direct(self) -> None:
         """Send head directly to its home position (no planning)."""
         if "head" not in self.home_positions:
             return
-        self.robot.head.set_joint_pos(
-            self.home_positions["head"], wait_time=2.0, exit_on_reach=True
-        )
+        self.robot.head.move_to_joint_pos(
+            self.home_positions["head"]
+        ).wait(timeout=2.0)
 
     def _plan_and_execute_arms_to_home(self) -> None:
         """Plan a collision-free trajectory for both arms to their home pose.
@@ -916,7 +914,7 @@ class RobotController:
             if self.exit_requested:
                 return
             for name, target in targets.items():
-                getattr(self.robot, name).set_joint_pos(target, wait_time=0.0)
+                getattr(self.robot, name).set_joint_pos(target)
             self._validate_live_arm_safety()
 
             actuals: dict[str, np.ndarray] = {}
@@ -1039,7 +1037,7 @@ class RobotController:
         deadline = time.monotonic() + self.FINAL_REACH_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
             for name, target in targets.items():
-                getattr(self.robot, name).set_joint_pos(target, wait_time=0.0)
+                getattr(self.robot, name).set_joint_pos(target)
             self._validate_live_arm_safety()
             errors = {
                 name: float(
@@ -1111,11 +1109,11 @@ class RobotController:
         for waypoint in trajectory:
             if has_left and all(j in waypoint for j in left_names):
                 self.robot.left_arm.set_joint_pos(
-                    np.array([waypoint[j] for j in left_names]), wait_time=0.0
+                    np.array([waypoint[j] for j in left_names])
                 )
             if has_right and all(j in waypoint for j in right_names):
                 self.robot.right_arm.set_joint_pos(
-                    np.array([waypoint[j] for j in right_names]), wait_time=0.0
+                    np.array([waypoint[j] for j in right_names])
                 )
             rate_limiter.sleep()
 
@@ -1191,9 +1189,9 @@ class RobotController:
             self.robot.estop.deactivate()
             self._ensure_arms_in_position_mode()
             self.robot.head.set_mode("enable")
-            self.robot.head.set_joint_pos(
-                self.home_positions["head"], wait_time=2.0, exit_on_reach=True
-            )
+            self.robot.head.move_to_joint_pos(
+                self.home_positions["head"]
+            ).wait(timeout=2.0)
             # Drop trajectory points accumulated before the pause so the
             # resume follows the fresh command flow instead of a stale,
             # possibly unclipped target.
@@ -1566,7 +1564,7 @@ class RobotController:
         if "right_arm" in components:
             arm_commands["right_arm"] = components["right_arm"]["pos"]
         if arm_commands:
-            self.robot.set_joint_pos(arm_commands, wait_time=5.0, exit_on_reach=True)
+            self.robot.move_to_joint_pos(arm_commands).wait(timeout=5.0)
             self._arm_tracking_watchdog.reset()
 
     def _send_base_command(self, base_data: Dict):
@@ -1592,13 +1590,11 @@ class RobotController:
             self.robot.torso.set_joint_pos_vel(
                 torso_data["pos"],
                 0.2,
-                wait_time=0.0,
             )
         else:
             self.robot.torso.set_joint_pos_vel(
                 torso_data["pos"],
                 torso_data["vel"],
-                wait_time=0.0,
             )
 
     def _send_head_command(self, head_data: Dict):
@@ -1628,7 +1624,7 @@ class RobotController:
                     velocities = arm_data["vel"]
                     arm.set_joint_pos_vel(positions, velocities)
                 else:
-                    arm.set_joint_pos(positions, wait_time=0.0)
+                    arm.set_joint_pos(positions)
 
     def _send_hand_command(self, hand_name: str, hand_data: Dict):
         """Send command to hand.

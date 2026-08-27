@@ -173,7 +173,7 @@ Expected versions:
 ```text
 Python 3.10
 dextop 0.5.0
-dexcontrol 0.4.10
+dexcontrol 0.5.0
 ```
 
 Do not run a general `apt upgrade` or upgrade Dexmate packages without checking
@@ -393,7 +393,7 @@ Install the required versions:
 
 ```bash
 python -m pip install 'dextop==0.5.0'
-python -m pip install 'dexcontrol==0.4.10'
+python -m pip install 'dexcontrol==0.5.0'
 ```
 
 Verify:
@@ -409,7 +409,7 @@ Expected:
 ```text
 Python 3.11
 dextop 0.5.0
-dexcontrol 0.4.10
+dexcontrol 0.5.0
 ```
 
 If `dexrobot` already exists, check and upgrade `dexcontrol` if needed:
@@ -417,7 +417,7 @@ If `dexrobot` already exists, check and upgrade `dexcontrol` if needed:
 ```bash
 conda activate dexrobot
 python -c "import importlib.metadata as m; print(m.version('dexcontrol'))"
-python -m pip install 'dexcontrol==0.4.10'
+python -m pip install 'dexcontrol==0.5.0'
 ```
 
 ## B.2 Set User Environment Variables

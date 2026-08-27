@@ -103,7 +103,7 @@ Make sure you have completed the steps in the
 [Lab Member Quickstart](https://github.com/slurm-lab-usc/dexmate-teleop/blob/main/docs/lab_member_quickstart.md):
 
 - `dexrobot` conda environment created
-- `dextop==0.4.7` and `dexcontrol==0.4.10` installed
+- `dextop==0.5.0` and `dexcontrol==0.5.0` installed
 - `ROBOT_NAME`, `ROBOT_IP`, `ROBOT_CONFIG`, and `ZENOH_CONFIG` set
 - Robot connection verified with `dextop topic list`
 

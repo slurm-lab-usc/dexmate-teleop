@@ -61,11 +61,11 @@ class ReadOnlyJointComponent(RobotComponent):
         return self._joint_pos_limit.copy()
 
     def get_joint_pos(self, joint_id: list[int] | int | None = None) -> np.ndarray:
-        values = np.asarray(self._get_state()["pos"], dtype=np.float32)
+        values = np.asarray(self.get_state()["pos"], dtype=np.float32)
         return self._select(values, joint_id)
 
     def get_joint_vel(self, joint_id: list[int] | int | None = None) -> np.ndarray:
-        state = self._get_state()
+        state = self.get_state()
         if "vel" not in state:
             raise ValueError("Joint velocities are not available for this component")
         values = np.asarray(state["vel"], dtype=np.float32)
@@ -107,7 +107,7 @@ class ReadOnlyWrenchSensor(RobotComponent):
         )
 
     def get_wrench_state(self) -> np.ndarray:
-        return np.asarray(self._get_state()["wrench"], dtype=np.float32)
+        return np.asarray(self.get_state()["wrench"], dtype=np.float32)
 
 
 class ReadOnlyEStop(RobotComponent):
@@ -120,12 +120,20 @@ class ReadOnlyEStop(RobotComponent):
             state_decoder=EStopStateCodec.decode,
         )
 
-    def is_software_estop_enabled(self) -> bool:
+    def _latest_state(self) -> dict[str, Any] | None:
         state = self._subscriber.get_latest()
+        if state is None:
+            return None
+        if hasattr(state, "data"):
+            state = state.data
+        return state if isinstance(state, dict) else None
+
+    def is_software_estop_enabled(self) -> bool:
+        state = self._latest_state()
         return bool(state and state.get("software_estop_enabled", False))
 
     def is_button_pressed(self) -> bool:
-        state = self._subscriber.get_latest()
+        state = self._latest_state()
         if not state:
             return False
         return any(

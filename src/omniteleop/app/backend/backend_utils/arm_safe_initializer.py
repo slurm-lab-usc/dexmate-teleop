@@ -214,7 +214,7 @@ class ArmSafeInitializer:
         """Read arm positions and enforce state/error/limit invariants."""
         actuals: dict[str, np.ndarray] = {}
         for name, (arm, target) in targets.items():
-            state = arm._get_state()  # noqa: SLF001 - public getters omit errors
+            state = arm.get_state()  # noqa: SLF001 - public getters omit errors
             if has_active_joint_error(state.get("error")):
                 raise RuntimeError(f"{name} reports errors: {state['error']}")
             actual = np.asarray(state.get("pos", []), dtype=float)
@@ -288,7 +288,7 @@ class ArmSafeInitializer:
             last_errors = {}
             for name, (arm, target) in targets.items():
                 arm.set_joint_pos(target)
-                state = arm._get_state()  # noqa: SLF001
+                state = arm.get_state()  # noqa: SLF001
                 if has_active_joint_error(state.get("error")):
                     raise RuntimeError(f"{name} reports errors: {state['error']}")
                 actual = np.asarray(state.get("pos", []), dtype=float)

@@ -1114,7 +1114,7 @@ class TeleopApp:
                         }
                         starts: Dict[str, np.ndarray] = {}
                         for name, arm in arms.items():
-                            state = arm._get_state()  # noqa: SLF001
+                            state = arm.get_state()  # noqa: SLF001
                             position = np.asarray(state.get("pos", []), dtype=float)
                             limits = arm.joint_pos_limit
                             if (
@@ -1141,7 +1141,7 @@ class TeleopApp:
                                 clear_deadline = time.monotonic() + 2.0
                                 while time.monotonic() < clear_deadline:
                                     if not has_active_joint_error(
-                                        arm._get_state().get("error")  # noqa: SLF001
+                                        arm.get_state().get("error")  # noqa: SLF001
                                     ):
                                         break
                                     time.sleep(0.02)
@@ -1167,7 +1167,7 @@ class TeleopApp:
                             hold_deadline = time.monotonic() + 0.5
                             while time.monotonic() < hold_deadline:
                                 for name, arm in arms.items():
-                                    arm.set_joint_pos(starts[name], wait_time=0.0)
+                                    arm.set_joint_pos(starts[name])
                                 time.sleep(0.01)
                             hold_drift = {
                                 name: float(
@@ -1225,10 +1225,7 @@ class TeleopApp:
                             final_hold_deadline = time.monotonic() + 0.5
                             while time.monotonic() < final_hold_deadline:
                                 for name, arm in arms.items():
-                                    arm.set_joint_pos(
-                                        final_targets[name],
-                                        wait_time=0.0,
-                                    )
+                                    arm.set_joint_pos(final_targets[name])
                                 time.sleep(0.01)
                             result.update(
                                 {
@@ -1258,10 +1255,7 @@ class TeleopApp:
                                 failure_hold_deadline = time.monotonic() + 0.5
                                 while time.monotonic() < failure_hold_deadline:
                                     for name, arm in arms.items():
-                                        arm.set_joint_pos(
-                                            failure_targets[name],
-                                            wait_time=0.0,
-                                        )
+                                        arm.set_joint_pos(failure_targets[name])
                                     time.sleep(0.01)
                             raise
 

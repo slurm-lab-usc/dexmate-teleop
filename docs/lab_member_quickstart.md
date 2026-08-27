@@ -56,7 +56,7 @@ Install the required communication versions:
 
 ```bash
 python -m pip install 'dextop==0.5.0'
-python -m pip install 'dexcontrol==0.4.10'
+python -m pip install 'dexcontrol==0.5.0'
 ```
 
 Verify:
